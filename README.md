@@ -1,7 +1,24 @@
 # kvb-hafas-client
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](requirements.txt)
+[![Tests: mocked HTTP](https://img.shields.io/badge/tests-mocked%20HTTP-brightgreen.svg)](tests/test_client.py)
+
 Inoffizieller Python-Client für die Echtzeit-Fahrplandaten der **KVB** (Kölner
-Verkehrs-Betriebe AG), Köln.
+Verkehrs-Betriebe AG), Köln — Haltestellensuche, Live-Abfahrten, Verbindungen
+und Störungsmeldungen, ohne offizielle API.
+
+## Inhalt
+
+- [Hintergrund](#hintergrund)
+- [⚠️ Rechtlicher Hinweis](#️-rechtlicher-hinweis)
+- [Installation](#installation)
+- [Nutzung](#nutzung)
+- [Was funktioniert](#was-funktioniert)
+- [Tests](#tests)
+- [Nächste Schritte / Ideen](#nächste-schritte--ideen)
+- [Mitwirken](#mitwirken)
+- [Lizenz](#lizenz)
 
 ## Hintergrund
 
@@ -89,3 +106,15 @@ den KVB-Server nötig.
 - `himL`/`msgL` (Störungsmeldungen) zusätzlich zum `isCncl`-Flag auswerten.
 - Persistenz/Zeitreihen für eigene Auslastungs-Heuristik (z.B. Ist- vs.
   Soll-Abweichung über Zeit als Proxy für Verspätungshäufigkeit).
+
+## Mitwirken
+
+Issues und Pull Requests sind willkommen. Vor größeren Änderungen bitte
+erst ein Issue aufmachen, um das Vorgehen abzustimmen. Neue Features sollten
+mit Tests gegen gemockte HTTP-Responses abgesichert sein (`tests/test_client.py`).
+
+## Lizenz
+
+[MIT](LICENSE) — siehe Lizenztext für Details. Beachte trotzdem den
+[rechtlichen Hinweis](#️-rechtlicher-hinweis) oben: die MIT-Lizenz betrifft nur
+den Code, nicht die Nutzungsbedingungen des KVB-Endpoints.
