@@ -43,6 +43,7 @@ class Departure:
     realtime: str | None
     platform: str | None
     cancelled: bool
+    jid: str  # pass to client.journey_details() for the full stop sequence
 
 
 class KVBHafasClient:
@@ -111,6 +112,52 @@ class KVBHafasClient:
             )
         return stops
 
+    def nearby_stops(self, lat: float, lon: float, max_dist_m: int = 500, max_results: int = 10) -> list[Stop]:
+        """Find stops/POIs within max_dist_m meters of the given coordinates.
+
+        Note: without a location-type filter this also returns POIs (museums,
+        landmarks, etc.), not just public transport stops. HAFAS supports a
+        `locFltrL` product-type bitmask to restrict this to stops only; the
+        exact bitmask for KVB hasn't been reverse-engineered yet (see
+        docs/API.md).
+        """
+        res = self._call(
+            "LocGeoPos",
+            {
+                "ring": {
+                    "cCrd": {"x": round(lon * 1_000_000), "y": round(lat * 1_000_000)},
+                    "maxDist": max_dist_m,
+                },
+                "maxLoc": max_results,
+            },
+        )
+        stops = []
+        for loc in res.get("locL", []):
+            crd = loc.get("crd")
+            stops.append(
+                Stop(
+                    name=loc.get("name", ""),
+                    ext_id=loc.get("extId", ""),
+                    lat=crd["y"] / 1_000_000 if crd else None,
+                    lon=crd["x"] / 1_000_000 if crd else None,
+                )
+            )
+        return stops
+
+    def journey_details(self, jid: str) -> dict[str, Any]:
+        """Fetch full stop-by-stop details for a single journey.
+
+        `jid` comes from a Departure/journey object's "jid" field (not
+        currently exposed on the Departure dataclass — extend station_board
+        if you need it, or call _call("StationBoard", ...) directly and
+        read jny["jid"]).
+
+        Returns the raw `journey` dict (includes `stopL`: every stop with
+        planned/realtime arrival+departure times and platform info).
+        """
+        res = self._call("JourneyDetails", {"jid": jid})
+        return res.get("journey", {})
+
     def station_board(self, stop_ext_id: str, max_journeys: int = 10) -> list[Departure]:
         """Fetch the live departure board for a stop (by extId, see find_stops)."""
         res = self._call(
@@ -135,6 +182,7 @@ class KVBHafasClient:
                     realtime=stb.get("dTimeR"),
                     platform=stb.get("dPlatfR") or stb.get("dPlatfS"),
                     cancelled=bool(jny.get("isCncl", False)),
+                    jid=jny.get("jid", ""),
                 )
             )
         return departures

@@ -41,8 +41,40 @@ STATIONBOARD_RESPONSE = {
                         "prodX": 0,
                         "dirTxt": "Deckstein",
                         "isCncl": False,
+                        "jid": "1|2100|1|1|15092026",
                     }
                 ],
+            },
+        }
+    ]
+}
+
+JOURNEYDETAILS_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "JourneyDetails",
+            "err": "OK",
+            "res": {
+                "journey": {
+                    "stopL": [
+                        {"dTimeS": "210000", "dTimeR": "232400", "idx": 0},
+                        {"aTimeS": "210300", "idx": 1},
+                    ]
+                }
+            },
+        }
+    ]
+}
+
+LOCGEOPOS_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "LocGeoPos",
+            "err": "OK",
+            "res": {
+                "locL": [
+                    {"name": "Köln Neumarkt", "extId": "900000002", "crd": {"x": 6959800, "y": 50936600}}
+                ]
             },
         }
     ]
@@ -89,3 +121,29 @@ def test_call_raises_on_error_code():
     with patch.object(client.session, "post", return_value=_mock_response(ERROR_RESPONSE)):
         with pytest.raises(KVBHafasError):
             client.station_board("900000002")
+
+
+def test_station_board_includes_jid():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)):
+        deps = client.station_board("900000002")
+
+    assert deps[0].jid == "1|2100|1|1|15092026"
+
+
+def test_journey_details_returns_stop_list():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(JOURNEYDETAILS_RESPONSE)):
+        journey = client.journey_details("1|2100|1|1|15092026")
+
+    assert len(journey["stopL"]) == 2
+    assert journey["stopL"][0]["dTimeR"] == "232400"
+
+
+def test_nearby_stops_parses_locations():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(LOCGEOPOS_RESPONSE)):
+        stops = client.nearby_stops(lat=50.9366, lon=6.9598)
+
+    assert len(stops) == 1
+    assert stops[0].name == "Köln Neumarkt"
