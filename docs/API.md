@@ -181,23 +181,39 @@ für eine simple Direktstrecke zurück (unterschiedliche Abfahrtszeiten).
 
 ### HimSearch — Störungsmeldungen
 
-Existiert (Störungsmeldungen tauchen z.B. als `himL`/`himMsgEventL` im
-`common`-Block von `StationBoard`-Responses auf), aber die eigenständige
-Abfrage ist noch nicht sauber reverse-engineered:
+**Funktioniert — mit leerem Filter.** Der Trick: `himFltrL: []` (keine
+Filter) liefert alle aktuell aktiven Meldungen netzweit, statt eines Fehlers:
 
 ```json
 {
   "meth": "HimSearch",
-  "req": { "himFltrL": [{ "type": "STATION", "mode": "INC", "value": "900000002" }] }
+  "req": { "himFltrL": [] }
 }
 ```
 
-Ein Testaufruf mit diesem Filter ergab einen `PARSE`-Fehler auf Top-Level.
-Gültige `type`-Werte laut Fehlermeldung eines anderen Tests: `EID, SRC,
-DEPT, HIMID, TRAIN, HIMCAT, PID, HIMTAG, COMP, TXT, OPR, LINE, SENDER,
-GLINEID, PROD, AFLD, HIMTXT, LINEID, STATION, CAT, ADMIN, META, CH, UIC,
-REG` — Groß-/Kleinschreibung ist relevant (`"line"` schlägt fehl, `"LINE"`
-vermutlich nicht, aber ungetestet). **Offener TODO**, siehe unten.
+**Response** (`res.msgL[]`), pro Meldung u.a.:
+
+| Feld | Bedeutung |
+|---|---|
+| `text` | Meldungstext (Klartext, oft mit `(H)` für Haltestelle) |
+| `cat` | Kategorie: `1` = Aufzug/Fahrzeuge außer Betrieb, `3` = Baumaßnahme/Verlegung, `99` = **Marketing** (KVB-Werbung, kein Betriebshinweis — rausfiltern!) |
+| `prio` | Priorität |
+| `sDate`/`eDate` | Gültigkeitszeitraum (Start/Ende, `YYYYMMDD`) |
+| `fLocX`/`tLocX` | Index in `res.common.locL[]` — betroffene Haltestelle(n), falls vorhanden |
+
+⚠️ Es gibt **keinen funktionierenden Filter nach Haltestelle oder Linie** —
+alle bisher getesteten `himFltrL`-Filtertypen (`STATION`, `PROD`, mit
+`mode: "INC"` oder ohne) führten zu einem `PARSE`-Fehler auf
+Envelope-Ebene (`res.svcResL` leer, `err` direkt im Top-Level-Objekt statt
+in `svcResL[0]`). Einzig `REG` mit einem numerischen Wert (`"1"`) und der
+leere Filter funktionieren. Client-seitiges Filtern nach `fLocX`/`tLocX`
+gegen die gewünschte `extId` ist der pragmatische Workaround.
+
+Gültige `type`-Werte laut einer Fehlermeldung bei falscher Groß-/
+Kleinschreibung: `EID, SRC, DEPT, HIMID, TRAIN, HIMCAT, PID, HIMTAG, COMP,
+TXT, OPR, LINE, SENDER, GLINEID, PROD, AFLD, HIMTXT, LINEID, STATION, CAT,
+ADMIN, META, CH, UIC, REG` — welche davon tatsächlich ohne Parse-Fehler
+funktionieren, ist noch nicht systematisch durchgetestet.
 
 ## Historische Daten
 

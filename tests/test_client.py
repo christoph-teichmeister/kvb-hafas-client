@@ -82,6 +82,58 @@ LOCGEOPOS_RESPONSE = {
 
 ERROR_RESPONSE = {"svcResL": [{"meth": "StationBoard", "err": "FAIL", "res": {}}]}
 
+ENVELOPE_ERROR_RESPONSE = {"svcResL": [], "err": "PARSE", "id": "abc123"}
+
+HIMSEARCH_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "HimSearch",
+            "err": "OK",
+            "res": {
+                "msgL": [
+                    {
+                        "text": "Baumaßnahme im Bereich der Haltestelle Neumarkt.",
+                        "cat": 3,
+                        "prio": 2,
+                        "sDate": "20260910",
+                        "eDate": "20270310",
+                    },
+                    {
+                        "text": "Werbung: Jetzt das Deutschlandticket buchen.",
+                        "cat": 99,
+                        "prio": 99,
+                        "sDate": "20260915",
+                        "eDate": "20260915",
+                    },
+                ]
+            },
+        }
+    ]
+}
+
+TRIPSEARCH_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "TripSearch",
+            "err": "OK",
+            "res": {
+                "outConL": [
+                    {
+                        "dep": {"dTimeS": "120400"},
+                        "arr": {"aTimeS": "120700"},
+                        "secL": [{"type": "JNY"}],
+                    },
+                    {
+                        "dep": {"dTimeS": "121400"},
+                        "arr": {"aTimeS": "122100"},
+                        "secL": [{"type": "JNY"}, {"type": "WALK"}, {"type": "JNY"}],
+                    },
+                ]
+            },
+        }
+    ]
+}
+
 
 def _mock_response(json_data):
     resp = MagicMock()
@@ -147,3 +199,32 @@ def test_nearby_stops_parses_locations():
 
     assert len(stops) == 1
     assert stops[0].name == "Köln Neumarkt"
+
+
+def test_service_alerts_parses_messages():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(HIMSEARCH_RESPONSE)):
+        alerts = client.service_alerts()
+
+    assert len(alerts) == 2
+    assert "Baumaßnahme" in alerts[0].text
+    assert alerts[0].category == 3
+    assert alerts[1].category == 99  # Werbung — Aufrufer muss selbst filtern
+
+
+def test_trip_search_parses_connections():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(TRIPSEARCH_RESPONSE)):
+        connections = client.trip_search("900000002", "900000001")
+
+    assert len(connections) == 2
+    assert connections[0].dep_time == "120400"
+    assert connections[0].num_changes == 0
+    assert connections[1].num_changes == 2
+
+
+def test_call_raises_on_envelope_level_error():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(ENVELOPE_ERROR_RESPONSE)):
+        with pytest.raises(KVBHafasError):
+            client.service_alerts()

@@ -62,10 +62,10 @@ python example.py Neumarkt
 | Haltestellensuche (`find_stops`) | ✅ |
 | Umkreissuche (`nearby_stops`) | ✅ liefert aber auch POIs, kein reiner Stop-Filter |
 | Echtzeit-Abfahrten (`station_board`) | ✅ inkl. Soll/Ist-Zeiten |
-| Fahrtausfälle | ✅ `isCncl`-Flag vorhanden (noch nicht gegen echten Ausfall verifiziert) |
+| Fahrtausfälle (`isCncl`-Flag) | ✅ vorhanden, noch nicht gegen echten Ausfall verifiziert |
 | Zwischenhalte einer Fahrt (`journey_details`) | ✅ |
-| Verbindungssuche (TripSearch) | 🚧 in der API vorhanden, noch nicht als Client-Methode gekapselt — siehe [docs/API.md](docs/API.md) |
-| Störungsmeldungen (HimSearch) | 🚧 API-Methode existiert, Request-Format noch nicht vollständig verstanden |
+| Verbindungssuche (`trip_search`) | ✅ |
+| Störungsmeldungen (`service_alerts`) | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — **kein Filter nach Haltestelle/Linie**, du musst client-seitig filtern (und die eingestreute KVB-Werbung, `category == 99`, selbst rausfiltern) |
 | Historische Ist-Daten (Verspätungen/Ausfälle rückblickend) | ❌ nicht verfügbar, nur der Fahrplan der aktuellen Periode — siehe [docs/API.md](docs/API.md#historische-daten) |
 | Auslastungsdaten | ❌ nicht gefunden, vermutlich von KVB nicht befüllt |
 

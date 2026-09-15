@@ -46,6 +46,23 @@ class Departure:
     jid: str  # pass to client.journey_details() for the full stop sequence
 
 
+@dataclass
+class ServiceAlert:
+    text: str
+    category: int  # cat: 1=Aufzug/Fahrzeuge, 2/3=Baumaßnahme/Verlegung, 99=Marketing (unverifizierte Zuordnung)
+    priority: int
+    valid_from: str  # sDate (YYYYMMDD)
+    valid_to: str  # eDate (YYYYMMDD)
+
+
+@dataclass
+class Connection:
+    dep_time: str
+    arr_time: str
+    num_changes: int  # Anzahl Umstiege (len(secL) - 1, min 0)
+
+
+
 class KVBHafasClient:
     """Minimal client for the KVB HAFAS mgate endpoint.
 
@@ -81,6 +98,9 @@ class KVBHafasClient:
         )
         resp.raise_for_status()
         data = resp.json()
+        if data.get("err") and data["err"] != "OK":
+            # Top-level envelope error (malformed request) — no svcResL entries at all.
+            raise KVBHafasError(f"{meth} failed at envelope level: {data['err']} ({data.get('errTxt', '')})")
         svc_res = data["svcResL"][0]
         if svc_res.get("err") != "OK":
             raise KVBHafasError(f"{meth} failed: {svc_res.get('err')}")
@@ -186,6 +206,60 @@ class KVBHafasClient:
                 )
             )
         return departures
+
+    def service_alerts(self) -> list[ServiceAlert]:
+        """Fetch all currently active service alerts network-wide.
+
+        Includes construction notices, elevator outages, stop relocations —
+        and, mixed in, KVB marketing announcements (cat=99 in the raw data;
+        filter those out client-side if you only want disruptions). There is
+        no per-station/per-line filter that reliably works yet (see
+        docs/API.md) — this returns everything active right now.
+        """
+        res = self._call("HimSearch", {"himFltrL": []})
+        alerts = []
+        for msg in res.get("msgL", []):
+            alerts.append(
+                ServiceAlert(
+                    text=msg.get("text", "").strip(),
+                    category=msg.get("cat", -1),
+                    priority=msg.get("prio", -1),
+                    valid_from=msg.get("sDate", ""),
+                    valid_to=msg.get("eDate", ""),
+                )
+            )
+        return alerts
+
+    def trip_search(
+        self, from_ext_id: str, to_ext_id: str, date: str | None = None, time: str | None = None
+    ) -> list[Connection]:
+        """Search for connections between two stops (by extId, see find_stops).
+
+        `date`/`time` optional (YYYYMMDD / HHMMSS) — defaults to "now" if
+        omitted. Subject to the same timetable-period limits as
+        station_board(), see docs/API.md#historische-daten.
+        """
+        req: dict[str, Any] = {
+            "depLocL": [{"extId": from_ext_id}],
+            "arrLocL": [{"extId": to_ext_id}],
+        }
+        if date:
+            req["outDate"] = date
+        if time:
+            req["outTime"] = time
+
+        res = self._call("TripSearch", req)
+        connections = []
+        for con in res.get("outConL", []):
+            sec_l = con.get("secL", [])
+            connections.append(
+                Connection(
+                    dep_time=con.get("dep", {}).get("dTimeS", ""),
+                    arr_time=con.get("arr", {}).get("aTimeS", ""),
+                    num_changes=max(len(sec_l) - 1, 0),
+                )
+            )
+        return connections
 
 
 if __name__ == "__main__":
