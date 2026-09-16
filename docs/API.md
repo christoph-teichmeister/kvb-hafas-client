@@ -10,12 +10,12 @@ Beispielen), nicht auf offizieller KVB-Dokumentation — es gibt keine.
 - [Grundlagen](#grundlagen)
 - [Auth](#auth)
 - [Methoden](#methoden)
-  - [LocMatch — Haltestellen suchen](#locmatch--haltestellen-suchen)
-  - [LocGeoPos — Haltestellen in der Nähe](#locgeopos--haltestellen-in-der-nähe)
-  - [StationBoard — Abfahrtstafel](#stationboard--abfahrtstafel)
-  - [JourneyDetails — Einzelfahrt im Detail](#journeydetails--einzelfahrt-im-detail)
-  - [TripSearch — Verbindungssuche](#tripsearch--verbindungssuche)
-  - [HimSearch — Störungsmeldungen](#himsearch--störungsmeldungen)
+    - [LocMatch — Haltestellen suchen](#locmatch--haltestellen-suchen)
+    - [LocGeoPos — Haltestellen in der Nähe](#locgeopos--haltestellen-in-der-nähe)
+    - [StationBoard — Abfahrtstafel](#stationboard--abfahrtstafel)
+    - [JourneyDetails — Einzelfahrt im Detail](#journeydetails--einzelfahrt-im-detail)
+    - [TripSearch — Verbindungssuche](#tripsearch--verbindungssuche)
+    - [HimSearch — Störungsmeldungen](#himsearch--störungsmeldungen)
 - [Historische Daten](#historische-daten)
 - [Auslastungsdaten](#auslastungsdaten)
 - [Bekannte Fehlercodes](#bekannte-fehlercodes)
@@ -39,10 +39,21 @@ Beispielen), nicht auf offizieller KVB-Dokumentation — es gibt keine.
   "id": "1@",
   "ver": "1.16",
   "lang": "deu",
-  "auth": { "type": "AID", "aid": "Rt6foY5zcTTRXMQs" },
-  "client": { "id": "HAFAS", "type": "WEB" },
+  "auth": {
+    "type": "AID",
+    "aid": "Rt6foY5zcTTRXMQs"
+  },
+  "client": {
+    "id": "HAFAS",
+    "type": "WEB"
+  },
   "svcReqL": [
-    { "meth": "<METHODE>", "req": { /* ... */ } }
+    {
+      "meth": "<METHODE>",
+      "req": {
+        /* ... */
+      }
+    }
   ]
 }
 ```
@@ -56,7 +67,10 @@ Haltestellen auf einmal abfragen willst.
 ## Auth
 
 ```json
-"auth": { "type": "AID", "aid": "Rt6foY5zcTTRXMQs" }
+"auth": {
+  "type": "AID",
+  "aid": "Rt6foY5zcTTRXMQs"
+}
 ```
 
 Kein Checksum/Salt-Mechanismus nötig (manche HAFAS-Installationen verlangen
@@ -76,7 +90,10 @@ Prefix-/Fuzzy-Matching zu aktivieren.
   "req": {
     "input": {
       "field": "S",
-      "loc": { "name": "Neumarkt?", "type": "S" },
+      "loc": {
+        "name": "Neumarkt?",
+        "type": "S"
+      },
       "maxLoc": 5
     }
   }
@@ -95,7 +112,13 @@ Umkreissuche nach Koordinaten.
 {
   "meth": "LocGeoPos",
   "req": {
-    "ring": { "cCrd": { "x": 6959800, "y": 50936600 }, "maxDist": 500 },
+    "ring": {
+      "cCrd": {
+        "x": 6959800,
+        "y": 50936600
+      },
+      "maxDist": 500
+    },
     "maxLoc": 10
   }
 }
@@ -105,8 +128,8 @@ Umkreissuche nach Koordinaten.
 etc.), nicht nur Haltestellen — im Test kamen z.B. "Gürzenich" und
 "Wallraf-Richartz-Museum" zurück. HAFAS unterstützt normalerweise einen
 `locFltrL`-Parameter mit einer Produkt-Typ-Bitmaske, um auf ÖPNV-Haltestellen
-einzuschränken; die korrekte Maske für KVB haben wir noch nicht verifiziert
-(ein Testwert `"1023"` führte zu keiner sichtbaren Filterung).
+einzuschränken; die korrekte Maske für KVB haben wir noch nicht verifiziert (ein Testwert `"1023"` führte zu keiner
+sichtbaren Filterung).
 
 ### StationBoard — Abfahrtstafel
 
@@ -117,7 +140,9 @@ Die Kernmethode für Echtzeit-Abfahrten.
   "meth": "StationBoard",
   "req": {
     "type": "DEP",
-    "stbLoc": { "extId": "900000002" },
+    "stbLoc": {
+      "extId": "900000002"
+    },
     "maxJny": 10
   }
 }
@@ -130,15 +155,15 @@ Die Kernmethode für Echtzeit-Abfahrten.
 
 **Response** (`res.jnyL[]`), pro Journey u.a.:
 
-| Feld | Bedeutung |
-|---|---|
-| `stbStop.dTimeS` | geplante Abfahrtszeit (Soll) |
-| `stbStop.dTimeR` | Echtzeit-Prognose (Ist) — fehlt bei rein geplanten/vergangenen Fahrten |
-| `stbStop.dPlatfS` / `dPlatfR` | Gleis/Bahnsteig, Soll/Ist |
-| `prodX` | Index in `res.common.prodL[]` → dort `name` = Linienbezeichnung (z.B. "146") |
-| `dirTxt` | Zielhaltestelle/Richtungstext |
-| `isCncl` | `true` bei Ausfall (im Test durchweg `false` — bei echten Ausfällen noch nicht verifiziert) |
-| `jid` | Journey-ID, Eingabe für `JourneyDetails` |
+| Feld                          | Bedeutung                                                                                   |
+|-------------------------------|---------------------------------------------------------------------------------------------|
+| `stbStop.dTimeS`              | geplante Abfahrtszeit (Soll)                                                                |
+| `stbStop.dTimeR`              | Echtzeit-Prognose (Ist) — fehlt bei rein geplanten/vergangenen Fahrten                      |
+| `stbStop.dPlatfS` / `dPlatfR` | Gleis/Bahnsteig, Soll/Ist                                                                   |
+| `prodX`                       | Index in `res.common.prodL[]` → dort `name` = Linienbezeichnung (z.B. "146")                |
+| `dirTxt`                      | Zielhaltestelle/Richtungstext                                                               |
+| `isCncl`                      | `true` bei Ausfall (im Test durchweg `false` — bei echten Ausfällen noch nicht verifiziert) |
+| `jid`                         | Journey-ID, Eingabe für `JourneyDetails`                                                    |
 
 ### JourneyDetails — Einzelfahrt im Detail
 
@@ -147,7 +172,9 @@ Alle Zwischenhalte einer einzelnen Fahrt, inkl. Soll/Ist-Zeiten pro Halt.
 ```json
 {
   "meth": "JourneyDetails",
-  "req": { "jid": "1|2100|1|1|15092026" }
+  "req": {
+    "jid": "1|2100|1|1|15092026"
+  }
 }
 ```
 
@@ -167,8 +194,16 @@ Klassische "Von A nach B"-Routenplanung mit Umstiegen.
 {
   "meth": "TripSearch",
   "req": {
-    "depLocL": [{ "extId": "900000002" }],
-    "arrLocL": [{ "extId": "900000001" }],
+    "depLocL": [
+      {
+        "extId": "900000002"
+      }
+    ],
+    "arrLocL": [
+      {
+        "extId": "900000001"
+      }
+    ],
     "outDate": "20260916",
     "outTime": "120000"
   }
@@ -187,19 +222,21 @@ Filter) liefert alle aktuell aktiven Meldungen netzweit, statt eines Fehlers:
 ```json
 {
   "meth": "HimSearch",
-  "req": { "himFltrL": [] }
+  "req": {
+    "himFltrL": []
+  }
 }
 ```
 
 **Response** (`res.msgL[]`), pro Meldung u.a.:
 
-| Feld | Bedeutung |
-|---|---|
-| `text` | Meldungstext (Klartext, oft mit `(H)` für Haltestelle) |
-| `cat` | Kategorie: `1` = Aufzug/Fahrzeuge außer Betrieb, `3` = Baumaßnahme/Verlegung, `99` = **Marketing** (KVB-Werbung, kein Betriebshinweis — rausfiltern!) |
-| `prio` | Priorität |
-| `sDate`/`eDate` | Gültigkeitszeitraum (Start/Ende, `YYYYMMDD`) |
-| `fLocX`/`tLocX` | Index in `res.common.locL[]` — betroffene Haltestelle(n), falls vorhanden |
+| Feld            | Bedeutung                                                                                                                                             |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `text`          | Meldungstext (Klartext, oft mit `(H)` für Haltestelle)                                                                                                |
+| `cat`           | Kategorie: `1` = Aufzug/Fahrzeuge außer Betrieb, `3` = Baumaßnahme/Verlegung, `99` = **Marketing** (KVB-Werbung, kein Betriebshinweis — rausfiltern!) |
+| `prio`          | Priorität                                                                                                                                             |
+| `sDate`/`eDate` | Gültigkeitszeitraum (Start/Ende, `YYYYMMDD`)                                                                                                          |
+| `fLocX`/`tLocX` | Index in `res.common.locL[]` — betroffene Haltestelle(n), falls vorhanden                                                                             |
 
 ⚠️ Es gibt **keinen funktionierenden Filter nach Haltestelle oder Linie** —
 alle bisher getesteten `himFltrL`-Filtertypen (`STATION`, `PROD`, mit
@@ -221,11 +258,11 @@ funktionieren, ist noch nicht systematisch durchgetestet.
 
 - `StationBoard` akzeptiert ein `date`-Feld auch für die Vergangenheit —
   aber nur innerhalb der **aktuellen Fahrplanperiode**. Getestet:
-  - `2026-01-01`, `2026-02-01`, `2025-12-15` → funktioniert (`err: OK`)
-  - `2025-12-13` und früher → `err: H9360` ("Date outside of the timetable
-    period") — die aktuelle Periode beginnt demnach ca. **14.-15.
-    Dezember 2025** (üblicher bundesweiter Fahrplanwechsel-Termin).
-  - `2025-09-15` (ein Jahr zurück) → ebenfalls `H9360`.
+    - `2026-01-01`, `2026-02-01`, `2025-12-15` → funktioniert (`err: OK`)
+    - `2025-12-13` und früher → `err: H9360` ("Date outside of the timetable
+      period") — die aktuelle Periode beginnt demnach ca. **14.-15.
+      Dezember 2025** (üblicher bundesweiter Fahrplanwechsel-Termin).
+    - `2025-09-15` (ein Jahr zurück) → ebenfalls `H9360`.
 - Und selbst innerhalb der gültigen Periode: für Tage in der Vergangenheit
   liefert die Antwort nur die **geplanten** Zeiten (`dTimeS`), das
   `dTimeR`-Feld (Echtzeit-Ist-Wert) fehlt. Es ist also nur der **Fahrplan**
@@ -234,6 +271,7 @@ funktionieren, ist noch nicht systematisch durchgetestet.
 
 Für echte Verlaufsdaten (Ist-Werte, Ausfallquoten über Zeit) gäbe es zwei
 Wege, beide außerhalb dieser API:
+
 1. **Selbst sammeln**: `StationBoard` regelmäßig pollen und die
    Ist-Werte + `isCncl`-Flags in einer eigenen DB persistieren — das ist der
    einzige Weg, an echte historische Ist-Daten zu kommen, wenn man nicht bei
@@ -254,13 +292,13 @@ nicht durchprobiert haben.
 
 ## Bekannte Fehlercodes
 
-| Code | Bedeutung |
-|---|---|
-| `OK` | Erfolg |
-| `H9360` | Datum außerhalb der gültigen Fahrplanperiode |
-| `PARSE` | Fehlerhafter Request-Body (Top-Level `err`, nicht in `svcResL`) |
-| `HAMM` | Fehler beim Deserialisieren eines Feldwerts (z.B. falscher Enum-Wert), ebenfalls Top-Level |
-| `FAIL` | Generischer Fehler (in Tests nur gemockt, nicht live gesehen) |
+| Code    | Bedeutung                                                                                  |
+|---------|--------------------------------------------------------------------------------------------|
+| `OK`    | Erfolg                                                                                     |
+| `H9360` | Datum außerhalb der gültigen Fahrplanperiode                                               |
+| `PARSE` | Fehlerhafter Request-Body (Top-Level `err`, nicht in `svcResL`)                            |
+| `HAMM`  | Fehler beim Deserialisieren eines Feldwerts (z.B. falscher Enum-Wert), ebenfalls Top-Level |
+| `FAIL`  | Generischer Fehler (in Tests nur gemockt, nicht live gesehen)                              |
 
 ## Wie das gefunden wurde
 
