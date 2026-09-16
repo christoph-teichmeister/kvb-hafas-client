@@ -1,7 +1,7 @@
 # kvb-hafas-client
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](requirements.txt)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![Tests: mocked HTTP](https://img.shields.io/badge/tests-mocked%20HTTP-brightgreen.svg)](tests/test_client.py)
 
 Inoffizieller Python-Client für die Echtzeit-Fahrplandaten der **KVB** (Kölner
@@ -48,8 +48,10 @@ Widget-Generator-Seite (`hafas_webapp_config.js` → `config/webapp.config.json`
 
 ## Installation
 
+Das Projekt nutzt [uv](https://docs.astral.sh/uv/):
+
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Nutzung
@@ -69,7 +71,7 @@ for dep in client.station_board(stops[0].ext_id):
 Oder direkt über die CLI:
 
 ```bash
-python example.py Neumarkt
+uv run example.py Neumarkt
 ```
 
 ## Was funktioniert
@@ -92,8 +94,7 @@ Fehlercodes:** [docs/API.md](docs/API.md)
 ## Tests
 
 ```bash
-pip install pytest
-python -m pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 Tests laufen komplett gegen gemockte HTTP-Responses — keine Live-Calls gegen
