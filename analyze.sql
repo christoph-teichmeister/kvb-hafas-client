@@ -4,6 +4,11 @@
 -- Alle Zeiten sind Soll-Zeiten. Verspätungen kommen hier nicht vor — die gibt
 -- die API rückblickend nicht her (siehe docs/API.md, "Historische Daten").
 --
+-- Zeitdifferenzen laufen über strftime('%s') (ganze Sekunden), nicht über
+-- julianday(): julianday liefert Fließkomma, eine Minute ergibt dort
+-- 0.99999994, und CAST(... AS INTEGER) schneidet das auf 0 ab. Jede
+-- Minutendifferenz wäre dadurch um bis zu eine Minute zu klein.
+--
 -- Hinweis zu Haltestellen-IDs: stop.ext_id ist eine Mast-ID, also pro
 -- Richtung/Bahnsteig verschieden. stop.station_id ist die zugehörige
 -- Master-Haltestelle — danach wird gruppiert, wenn "die Haltestelle"
@@ -57,7 +62,8 @@ WITH dep AS (
     WHERE st.dep_planned IS NOT NULL
 )
 SELECT haltestelle, station_id, richtung, abfahrt, stunde,
-       CAST((julianday(abfahrt) - julianday(vorherige)) * 1440 AS INTEGER) AS takt_min
+       (CAST(strftime('%s', abfahrt) AS INTEGER)
+        - CAST(strftime('%s', vorherige) AS INTEGER)) / 60 AS takt_min
 FROM dep
 WHERE vorherige IS NOT NULL;
 
@@ -148,9 +154,12 @@ SELECT direction,
        stop_count,
        CAST(strftime('%H', start) AS INTEGER) AS abfahrtsstunde,
        COUNT(*) AS fahrten,
-       ROUND(AVG((julianday(ziel) - julianday(start)) * 1440), 1) AS fahrzeit_min,
-       MIN(CAST((julianday(ziel) - julianday(start)) * 1440 AS INTEGER)) AS min_min,
-       MAX(CAST((julianday(ziel) - julianday(start)) * 1440 AS INTEGER)) AS max_min
+       ROUND(AVG((CAST(strftime('%s', ziel) AS INTEGER)
+                  - CAST(strftime('%s', start) AS INTEGER)) / 60.0), 1) AS fahrzeit_min,
+       MIN((CAST(strftime('%s', ziel) AS INTEGER)
+            - CAST(strftime('%s', start) AS INTEGER)) / 60) AS min_min,
+       MAX((CAST(strftime('%s', ziel) AS INTEGER)
+            - CAST(strftime('%s', start) AS INTEGER)) / 60) AS max_min
 FROM laufzeit
 GROUP BY direction, stop_count, abfahrtsstunde
 ORDER BY direction, stop_count, abfahrtsstunde;
