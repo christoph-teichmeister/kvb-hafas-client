@@ -585,7 +585,7 @@ Bounding-Box, mit Position.
 | Feld    | Bedeutung                                                                                                |
 |---------|----------------------------------------------------------------------------------------------------------|
 | `pos`   | aktuelle Position `{x, y}` (wie immer `* 1_000_000`)                                                       |
-| `ani`   | Animations-Track: `mSec[]` (Offsets in ms, hier 0/30k/60k/90k/120k), `proc[]` (Fortschritt zwischen zwei Halten in ‰), `dirGeo[]`, `fLocX[]`/`tLocX[]` — gedacht für flüssige Karten-Animation ohne Nachpollen |
+| `ani`   | Animations-Track: `mSec[]` (Offsets in ms, hier 0/30k/60k/90k/120k), `proc[]` (Fortschritt zwischen zwei Halten **in Prozent**, 0–100 — nicht in ‰, gegen die mitgelieferte Polyline gemessen), `dirGeo[]`, `fLocX[]`/`tLocX[]`, `polyG` → `common.polyL` (derselbe Track als Polyline) — gedacht für flüssige Karten-Animation ohne Nachpollen |
 | `stopL` | Halte der Fahrt mit Soll/Ist-Zeiten                                                                        |
 
 `trainPosMode: "CALC"` heißt: HAFAS **rechnet** die Position aus Fahrplan

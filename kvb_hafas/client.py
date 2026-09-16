@@ -35,7 +35,15 @@ from kvb_hafas.models import (
     Vehicle,
     WalkRoute,
 )
-from kvb_hafas.parsing import _decode_polyline, _line_from_prod, _mast_steig, station_ext_id
+from kvb_hafas.parsing import (
+    _ani_track,
+    _decode_polyline,
+    _delay_minutes,
+    _line_from_prod,
+    _mast_steig,
+    _prod_colours,
+    station_ext_id,
+)
 
 ENDPOINT = "https://auskunft.kvb.koeln/gate"
 # Public HAFAS access ID, served in cleartext by the KVB widget generator at
@@ -345,6 +353,7 @@ class KVBHafasClient:
         for msg in res.get("msgL", []):
             if stop is not None and not self._alert_matches_stop(msg, common, stop):
                 continue
+            stops, points = self._alert_geo(msg, common)
             alerts.append(
                 ServiceAlert(
                     text=msg.get("text", "").strip(),
@@ -352,9 +361,47 @@ class KVBHafasClient:
                     priority=msg.get("prio", -1),
                     valid_from=msg.get("sDate", ""),
                     valid_to=msg.get("eDate", ""),
+                    head=msg.get("head", "").strip(),
+                    hid=msg.get("hid", ""),
+                    stops=stops,
+                    points=points,
                 )
             )
         return alerts
+
+    @staticmethod
+    def _alert_geo(msg: dict[str, Any], common: dict[str, Any]) -> tuple[tuple[str, ...], list[tuple[float, float]]]:
+        """Betroffene Haltestellen und Koordinaten einer HIM-Meldung.
+
+        HimGeoPos (alerts_in_area) kam für Köln immer leer zurück — der
+        Geo-Bezug steckt stattdessen in den Loc-Referenzen der Meldung und in
+        `himMsgEdgeL[].icoCrd`. Meldungen ohne beides (viele Aufzugsstörungen
+        nennen ihre Haltestelle nur im Text) liefern leere Listen.
+        """
+        loc_l = common.get("locL", [])
+        event_l, edge_l = common.get("himMsgEventL", []), common.get("himMsgEdgeL", [])
+
+        loc_idx: list[int] = [i for i in (msg.get("fLocX"), msg.get("tLocX")) if i is not None]
+        for ref in msg.get("eventRefL", []):
+            if ref < len(event_l):
+                loc_idx += [i for i in (event_l[ref].get("fLocX"), event_l[ref].get("tLocX")) if i is not None]
+
+        names: list[str] = []
+        points: list[tuple[float, float]] = []
+        for idx in dict.fromkeys(loc_idx):
+            if idx >= len(loc_l):
+                continue
+            loc = loc_l[idx]
+            if loc.get("name") and loc["name"] not in names:
+                names.append(loc["name"])
+            crd = loc.get("crd") or {}
+            if "x" in crd and "y" in crd:
+                points.append((crd["y"] / 1_000_000, crd["x"] / 1_000_000))
+        for ref in msg.get("edgeRefL", []):
+            crd = edge_l[ref].get("icoCrd") if ref < len(edge_l) else None
+            if crd and "x" in crd and "y" in crd:
+                points.append((crd["y"] / 1_000_000, crd["x"] / 1_000_000))
+        return tuple(names), list(dict.fromkeys(points))
 
     @staticmethod
     def _alert_matches_stop(msg: dict[str, Any], common: dict[str, Any], stop: Stop) -> bool:
@@ -552,12 +599,20 @@ class KVBHafasClient:
         max_lat: float,
         max_lon: float,
         max_vehicles: int = 100,
+        segments: dict[tuple[str, str], list[tuple[float, float]]] | None = None,
     ) -> list[Vehicle]:
         """Live-Positionen aller Fahrzeuge in einer Bounding-Box (JourneyGeoPos).
 
         Positionen sind interpoliert (`trainPosMode: CALC`) — HAFAS rechnet
         sie aus Fahrplan plus Echtzeit-Prognose hoch, es sind keine
         GPS-Rohdaten. Die Box umfasst auch Regionalzüge im Bediengebiet.
+
+        `Vehicle.track` enthält den `ani`-Block als (offset_ms, lat, lon) über
+        die nächsten 120 Sekunden — damit lässt sich animieren, ohne erneut
+        abzufragen (siehe map_server.py).
+
+        `segments` (aus journey_segments()) lässt den Track dem echten
+        Streckenverlauf folgen statt der Luftlinie zwischen zwei Halten.
         """
         res = self._call(
             "JourneyGeoPos",
@@ -574,23 +629,90 @@ class KVBHafasClient:
                 "trainPosMode": "CALC",
             },
         )
-        prod_l = res.get("common", {}).get("prodL", [])
+        common = res.get("common", {})
+        prod_l, loc_l = common.get("prodL", []), common.get("locL", [])
+        ico_l = common.get("icoL", [])
         vehicles = []
         for jny in res.get("jnyL", []):
             pos = jny.get("pos")
             if not pos:
                 continue
             prod_idx = jny.get("prodX")
+            prod = prod_l[prod_idx] if prod_idx is not None and prod_idx < len(prod_l) else {}
+            bearing = jny.get("dirGeo")
+            ani = jny.get("ani") or {}
+            next_loc_x = (ani.get("tLocX") or [None])[0]
+            delay, next_stop = self._next_stop_delay(jny, loc_l, next_loc_x)
+            colour, text_colour = _prod_colours(prod, ico_l)
             vehicles.append(
                 Vehicle(
-                    line=prod_l[prod_idx].get("name", "") if prod_idx is not None and prod_idx < len(prod_l) else "",
+                    line=prod.get("name", ""),
                     direction=jny.get("dirTxt", ""),
                     lat=pos["y"] / 1_000_000,
                     lon=pos["x"] / 1_000_000,
                     jid=jny.get("jid", ""),
+                    category=prod.get("prodCtx", {}).get("catOut", "").strip(),
+                    bearing=bearing if isinstance(bearing, int) else None,
+                    delay=delay,
+                    next_stop=next_stop,
+                    colour=colour,
+                    text_colour=text_colour,
+                    track=_ani_track(ani, loc_l, segments),
                 )
             )
         return vehicles
+
+    @staticmethod
+    def _next_stop_delay(
+        jny: dict[str, Any], loc_l: list[dict[str, Any]], next_loc_x: int | None
+    ) -> tuple[int | None, str]:
+        """Verspätung und Name des Halts, auf den das Fahrzeug gerade zufährt.
+
+        `ani.tLocX[0]` benennt diesen Halt; der passende Eintrag in `stopL`
+        trägt Soll- und Ist-Zeit. Ohne Echtzeit-Prognose bleibt die Verspätung
+        None — das ist etwas anderes als "pünktlich".
+        """
+        if next_loc_x is None or not (0 <= next_loc_x < len(loc_l)):
+            return None, ""
+        name = loc_l[next_loc_x].get("name", "")
+        for stop in jny.get("stopL", []):
+            if stop.get("locX") != next_loc_x:
+                continue
+            for planned, realtime in (("aTimeS", "aTimeR"), ("dTimeS", "dTimeR")):
+                delay = _delay_minutes(stop.get(planned, ""), stop.get(realtime, ""))
+                if delay is not None:
+                    return delay, name
+            break
+        return None, name
+
+    def journey_segments(self, jid: str) -> dict[tuple[str, str], list[tuple[float, float]]]:
+        """Streckenverlauf einer Fahrt, aufgeteilt je Haltestellenpaar.
+
+        `JourneyDetails` mit `getPolyline` liefert deutlich mehr Stützpunkte
+        als journey_course() (Linie 18: 117 Punkte auf 30 Halte) und dazu
+        `ppLocRefL`, also die Zuordnung Halt -> Punktindex. Damit lässt sich
+        jede Fahrt zwischen zwei Halten dem tatsächlichen Verlauf folgen
+        lassen; die Abschnitte gelten für jede Fahrt derselben Relation.
+
+        Schlüssel sind die Mast-extIds beider Halte, wie sie auch
+        JourneyGeoPos in `common.locL` verwendet.
+        """
+        res = self._call("JourneyDetails", {"jid": jid, "getPolyline": True})
+        common = res.get("common", {})
+        poly_l, loc_l = common.get("polyL", []), common.get("locL", [])
+        if not poly_l or not poly_l[0].get("ppLocRefL"):
+            return {}
+        points = _decode_polyline(poly_l[0].get("crdEncYX", ""))
+        refs = sorted(poly_l[0]["ppLocRefL"], key=lambda ref: ref.get("ppIdx", 0))
+        segments: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        for start, end in zip(refs, refs[1:]):
+            from_x, to_x = start.get("locX"), end.get("locX")
+            if from_x is None or to_x is None or from_x >= len(loc_l) or to_x >= len(loc_l):
+                continue
+            path = points[start.get("ppIdx", 0) : end.get("ppIdx", 0) + 1]
+            if len(path) > 1:
+                segments[(loc_l[from_x].get("extId", ""), loc_l[to_x].get("extId", ""))] = path
+        return segments
 
     def find_lines(self, query: str) -> list[Line]:
         """Linien nach Label suchen (LineMatch).
