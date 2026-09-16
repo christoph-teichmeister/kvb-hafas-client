@@ -1,0 +1,1431 @@
+openapi: 3.1.0
+info:
+  title: KVB HAFAS (mgate) — inoffizielle Referenz
+  version: "1.16"
+  summary: Reverse-engineerter HAFAS-Endpoint der Kölner Verkehrs-Betriebe
+  description: |
+    Diese Spezifikation beschreibt den **inoffiziellen** HAFAS-`mgate`-Endpoint,
+    den die KVB für ihre eigene Fahrplanauskunft und den Widget-Generator nutzt.
+    Alles hier basiert auf eigenen Tests (Stand 2026-09-16), nicht auf
+    offizieller Dokumentation — es gibt keine.
+
+    ## Rechtlicher Hinweis
+
+    - **Nicht offiziell von der KVB freigegeben oder unterstützt.**
+    - Nutzung auf eigenes Risiko, der Endpoint kann jederzeit verschwinden.
+    - **Nicht kommerziell nutzen**, Rate-Limiting einhalten — das ist
+      Produktions-Infrastruktur der KVB.
+    - Kein KVB-Branding in eigenen Anwendungen verwenden.
+
+    ## Wie das Protokoll funktioniert
+
+    Es gibt genau **einen** HTTP-Endpoint: `POST /gate`. Die eigentliche
+    Methode steckt im Body unter `svcReqL[].meth`. Damit Swagger UI die
+    Methoden einzeln darstellen kann, sind sie hier als eigene Pfade mit
+    Fragment (`/gate#LocMatch`) modelliert — der Fragment-Teil wird vom Browser
+    nie mitgesendet, die reale URL ist immer `https://auskunft.kvb.koeln/gate`.
+
+    Mehrere `svcReqL`-Einträge in einem Request werden batch-weise in einer
+    Response beantwortet (`svcResL`, ein Eintrag pro Anfrage) — das spart
+    Roundtrips.
+
+    ## Haltestellen-IDs
+
+    | Form | Beispiel | Bedeutung |
+    |------|----------|-----------|
+    | `900xxxxxx` | `900000178` | **Master-Haltestelle** — das, was jede Methode als `extId` erwartet |
+    | `300xxxxxx` | `300000201` | **Steig/Mast** — einzelner Bahnsteig, über `mMastLocX` zum Master auflösbar |
+    | `1`–`949` | `178` | **KVB-interne Nummer** der Publikums-Website |
+
+    Es gilt `extId = 900000000 + kvb_nummer` (an 8/8 Stichproben verifiziert).
+
+    ## Fehlercodes
+
+    | Code | Bedeutung |
+    |------|-----------|
+    | `OK` | Erfolg |
+    | `H9360` | Datum außerhalb der gültigen Fahrplanperiode |
+    | `PARSE` | Fehlerhafter Request-Body (Top-Level `err`, nicht in `svcResL`) |
+    | `HAMM` | Unbekannte Methode **oder** unbekanntes/falsch typisiertes Feld im `req` |
+    | `NULLPTR`, `PARAMETER`, `LOCATION`, `DATE_TIME`, `DEPARTURE` | Methode existiert, Pflichtparameter fehlt |
+    | `FAIL` | Generischer Fehler |
+
+    Ausführliche Prosa-Fassung inkl. negativer Ergebnisse (Historie, Tarife,
+    Auslastung): [API.md](https://github.com/christoph-teichmeister/kvb-hafas-client/blob/main/docs/API.md)
+  license:
+    name: MIT
+    url: https://github.com/christoph-teichmeister/kvb-hafas-client/blob/main/LICENSE
+externalDocs:
+  description: kvb-hafas-client auf GitHub
+  url: https://github.com/christoph-teichmeister/kvb-hafas-client
+
+servers:
+  - url: https://auskunft.kvb.koeln
+    description: Produktions-Endpoint der KVB (nicht offiziell)
+
+tags:
+  - name: Orte
+    description: Haltestellen suchen, auflösen und im Umkreis finden
+  - name: Fahrten
+    description: Abfahrtstafeln, Einzelfahrten, Live-Positionen
+  - name: Verbindungen
+    description: Routing von A nach B, Wiederherstellung, Fußwege
+  - name: Störungen
+    description: HIM — Hafas Information Manager
+  - name: Linien
+    description: Linien suchen, Details, Linien im Umkreis
+  - name: System
+    description: Serverinfos
+
+paths:
+  /gate#LocMatch:
+    post:
+      tags: [Orte]
+      operationId: LocMatch
+      summary: Haltestellen suchen (Volltext)
+      description: |
+        Volltextsuche nach Haltestellennamen. Ein `?` am Ende von `name`
+        aktiviert Prefix-/Fuzzy-Matching.
+
+        **Response:** `res.match.locL[]` mit `name`, `extId` (die Stop-ID, die
+        alle anderen Methoden erwarten) und `crd` (`{x, y}`, jeweils
+        `* 1_000_000`, `x` = Longitude, `y` = Latitude).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocMatchEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LocMatch
+                  req:
+                    input:
+                      field: S
+                      loc: {name: "Neumarkt?", type: S}
+                      maxLoc: 5
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#LocGeoPos:
+    post:
+      tags: [Orte]
+      operationId: LocGeoPos
+      summary: Haltestellen in der Nähe (Umkreissuche)
+      description: |
+        Umkreissuche nach Koordinaten.
+
+        ⚠️ Liefert ohne zusätzlichen Filter **auch POIs** (Museen etc.), nicht
+        nur Haltestellen. HAFAS kennt normalerweise `locFltrL` mit einer
+        Produkt-Bitmaske; die korrekte Maske für KVB ist nicht verifiziert
+        (Testwert `"1023"` filterte nichts sichtbar).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocGeoPosEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LocGeoPos
+                  req:
+                    ring:
+                      cCrd: {x: 6959800, y: 50936600}
+                      maxDist: 500
+                    maxLoc: 10
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#LocDetails:
+    post:
+      tags: [Orte]
+      operationId: LocDetails
+      summary: Haltestelle im Detail (bedienende Linien, Steige)
+      description: |
+        Beachte die `lid`-Form `A=1@L=<extId>@` — ein blankes `{"extId": …}`
+        reicht hier **nicht**.
+
+        **Response** (`res.locL[0]`):
+
+        | Feld | Bedeutung |
+        |------|-----------|
+        | `pRefL` | Indizes in `common.prodL[]` → alle Linien, die den Halt bedienen |
+        | `stopLocL` | Indizes aller Steige/Masten |
+        | `entryLocL` | Zugänge/Eingänge |
+        | `isMainMast` | `true` beim Master-Eintrag |
+        | `wt` | interner "weight" (Bedeutung im Netz) |
+
+        `common.prodL` enthält **mehr** Linien als `pRefL` referenziert —
+        nur die referenzierten gelten. `pRefL` ist unvollständiger als
+        `LineGeoPos` (Nachtlinien fehlen).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocDetailsEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LocDetails
+                  req:
+                    locL:
+                      - {type: S, lid: "A=1@L=900000002@"}
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#LocGeoReach:
+    post:
+      tags: [Orte]
+      operationId: LocGeoReach
+      summary: Isochrone — erreichbare Haltestellen in X Minuten
+      description: |
+        **Response** (`res.posL[]`): pro Eintrag `locX` (Index in
+        `common.locL`), `dur` (Minuten), `chg` (Umstiege), `prodX`,
+        `lastLocX`. `date`/`time` sind optional.
+
+        ⚠️ `posL` zeigt auf **Steig-Einträge** (`300xxxxxx`), nicht auf
+        Haltestellen — Neumarkt/15 min/0 Umstiege ergab 132 Einträge für
+        deutlich weniger echte Haltestellen. Über `mMastLocX` auf den Master
+        auflösen und pro Haltestelle den schnellsten Eintrag behalten.
+
+        `getPoly: true` → `HAMM`, es gibt keine Isochronen-Fläche.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocGeoReachEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LocGeoReach
+                  req:
+                    loc: {type: S, lid: "A=1@L=900000002@"}
+                    maxDur: 15
+                    maxChg: 0
+                    date: "20260916"
+                    time: "120000"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#StationBoard:
+    post:
+      tags: [Fahrten]
+      operationId: StationBoard
+      summary: Abfahrts-/Ankunftstafel (Echtzeit)
+      description: |
+        Die Kernmethode für Echtzeit-Abfahrten.
+
+        **Response** (`res.jnyL[]`), pro Journey u.a.:
+
+        | Feld | Bedeutung |
+        |------|-----------|
+        | `stbStop.dTimeS` | geplante Abfahrtszeit (Soll) |
+        | `stbStop.dTimeR` | Echtzeit-Prognose (Ist) — fehlt bei rein geplanten/vergangenen Fahrten |
+        | `stbStop.dPlatfS` / `dPlatfR` | Gleis/Bahnsteig, Soll/Ist |
+        | `prodX` | Index in `res.common.prodL[]` → dort `name` = Linienbezeichnung |
+        | `dirTxt` | Zielhaltestelle/Richtungstext |
+        | `isCncl` | `true` bei Ausfall |
+        | `jid` | Journey-ID, Eingabe für `JourneyDetails` |
+
+        `date`/`time` sind optional (ohne Angabe: jetzt) und funktionieren auch
+        für Vergangenheit/Zukunft **innerhalb der aktuellen Fahrplanperiode**
+        (`ServerInfo` liefert deren Grenzen, außerhalb: `H9360`). Für
+        vergangene Tage fehlt `dTimeR` — nur der Soll-Fahrplan ist einsehbar,
+        keine Ist-Werte.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StationBoardEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: StationBoard
+                  req:
+                    type: DEP
+                    stbLoc: {extId: "900000002"}
+                    maxJny: 10
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#JourneyDetails:
+    post:
+      tags: [Fahrten]
+      operationId: JourneyDetails
+      summary: Einzelfahrt im Detail (alle Zwischenhalte)
+      description: |
+        `jid` kommt aus einem `StationBoard`- oder `TripSearch`-Ergebnis.
+        Journeys sind zeitlich begrenzt gültig — `jid`s vorheriger Tage
+        funktionieren nicht mehr.
+
+        **Response** (`res.journey.stopL[]`): jeder Zwischenhalt mit
+        `aTimeS`/`aTimeR` (Ankunft Soll/Ist), `dTimeS`/`dTimeR` (Abfahrt
+        Soll/Ist) und `idx` (Position in der Fahrt).
+
+        Mit `getPolyline: true` und `getPasslist: true` kommt zusätzlich
+        dieselbe Geometrie wie bei `JourneyCourse` zurück.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JourneyDetailsEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: JourneyDetails
+                  req:
+                    jid: "1|2100|1|1|15092026"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#JourneyMatch:
+    post:
+      tags: [Fahrten]
+      operationId: JourneyMatch
+      summary: Fahrten nach Linie — inkl. Verkehrstage
+      description: |
+        `date` **und** `time` sind Pflicht — ohne sie: `FAIL`.
+
+        **Response** (`res.jnyL[]`): Fahrten mit `jid`, `stopL` (nur erster und
+        letzter Halt), `pos` und vor allem `sDaysL[]`:
+
+        | Feld | Beispiel |
+        |------|----------|
+        | `sDaysI` | `"1. Jul bis 30. Sep 2026 Mo - Fr; nicht 10. bis 28. Aug 2026"` |
+        | `sDaysR` | `"nicht täglich"` |
+        | `sDaysB` | dieselbe Info als Hex-Bitmaske, ein Bit pro Betriebstag |
+
+        Das ist die **einzige** Methode, die Verkehrstage liefert.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JourneyMatchEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: JourneyMatch
+                  req:
+                    input: "18"
+                    date: "20260916"
+                    time: "120000"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#JourneyGeoPos:
+    post:
+      tags: [Fahrten]
+      operationId: JourneyGeoPos
+      summary: Live-Fahrzeugpositionen in einer Bounding-Box
+      description: |
+        **Response** (`res.jnyL[]`), zusätzlich zu den üblichen Journey-Feldern:
+
+        | Feld | Bedeutung |
+        |------|-----------|
+        | `pos` | aktuelle Position `{x, y}` (`* 1_000_000`) |
+        | `ani` | Animations-Track: `mSec[]` (Offsets in ms), `proc[]` (Fortschritt zwischen zwei Halten in ‰), `dirGeo[]`, `fLocX[]`/`tLocX[]` — für flüssige Karten-Animation ohne Nachpollen |
+        | `stopL` | Halte der Fahrt mit Soll/Ist-Zeiten |
+
+        `trainPosMode: "CALC"` heißt: HAFAS **rechnet** die Position aus
+        Fahrplan plus Echtzeit-Prognose hoch — keine GPS-Rohdaten.
+        `perSize`/`perStep` steuern Länge und Auflösung des Animations-Tracks.
+        Die Box liefert alles im Bediengebiet, also auch Regionalverkehr
+        anderer Betreiber.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JourneyGeoPosEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: JourneyGeoPos
+                  req:
+                    maxJny: 100
+                    onlyRT: false
+                    rect:
+                      llCrd: {x: 6900000, y: 50880000}
+                      urCrd: {x: 7020000, y: 50990000}
+                    perSize: 120000
+                    perStep: 30000
+                    ageOfReport: true
+                    trainPosMode: CALC
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#JourneyCourse:
+    post:
+      tags: [Fahrten]
+      operationId: JourneyCourse
+      summary: Linienverlauf einer Fahrt als Polyline
+      description: |
+        **Response:** `res.common.polyL[0]` mit
+
+        - `crdEncYX`: **Google-Encoded-Polyline** (`delta: true`, `dim: 2`,
+          `type: "WGS84"`, Faktor `1e5`) — mit dem Standard-Algorithmus
+          dekodierbar.
+        - `ppLocRefL`: `{locX, ppIdx}` — verknüpft Polyline-Punkte mit Halten
+          aus `common.locL`.
+
+        Es gibt einen Punkt **pro Halt**, keine straßengenaue Geometrie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JourneyCourseEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: JourneyCourse
+                  req:
+                    jid: "1|4809|1|1|16092026"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#TripSearch:
+    post:
+      tags: [Verbindungen]
+      operationId: TripSearch
+      summary: Verbindungssuche von A nach B
+      description: |
+        Klassische Routenplanung mit Umstiegen.
+
+        **Response** (`res.outConL[]`): Verbindungen mit `dep`/`arr` (Zeiten)
+        und `secL[]` (Teilstrecken/Umstiege). Jede Verbindung bringt ein
+        `ctxRecon`-Token mit, Eingabe für `Reconstruction` und `SearchOnTrip`.
+        `WALK`-Abschnitte enthalten unter `gis.ctx` das Token für `GisRoute`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TripSearchEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: TripSearch
+                  req:
+                    depLocL: [{extId: "900000002"}]
+                    arrLocL: [{extId: "900000001"}]
+                    outDate: "20260916"
+                    outTime: "120000"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#Reconstruction:
+    post:
+      tags: [Verbindungen]
+      operationId: Reconstruction
+      summary: Verbindung aus ctxRecon wiederherstellen
+      description: |
+        Fragt eine bereits gefundene Verbindung erneut ab — mit frischen
+        Echtzeitdaten, ohne neue Suche.
+
+        **Response:** aufgebaut wie `TripSearch` (`res.outConL[]`), aber mit
+        genau **einer** Verbindung. `outReconL: [{"ctx": "…"}]` ist eine
+        alternative Request-Form mit identischem Ergebnis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReconstructionEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: Reconstruction
+                  req:
+                    ctxRecon: "¶HKI¶T$A=1@O=Köln Neumarkt@L=300000203@a=128@$…"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#SearchOnTrip:
+    post:
+      tags: [Verbindungen]
+      operationId: SearchOnTrip
+      summary: Alternativen zu einer Verbindung
+      description: |
+        Braucht **nur** das `ctxRecon`-Token.
+
+        **Response:** `res.outConL[]` wie bei `TripSearch`, im Test **12
+        Verbindungen** — die ursprüngliche plus spätere Alternativen auf
+        derselben Relation. Das ist der Unterschied zu `Reconstruction`, das
+        genau eine liefert.
+
+        `sotMode: "RC"` ändert nichts, `sotMode: "JI"` mit `jid` statt
+        `ctxRecon` endet in `DATE_TIME`/`FAIL`. `date`/`time` sind gültige
+        Feldnamen, lassen den Request aber **immer** auf `PARSE` laufen — der
+        Zeitbezug steckt im Kontext.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchOnTripEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: SearchOnTrip
+                  req:
+                    ctxRecon: "¶HKI¶T$A=1@O=Köln Neumarkt@L=300000203@a=128@$…"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#GisRoute:
+    post:
+      tags: [Verbindungen]
+      operationId: GisRoute
+      summary: Fußweg straßengenau (nur aus gisCtx)
+      description: |
+        Kein freies A-nach-B-Routing, sondern die Lupe auf einen Fußweg, den
+        HAFAS schon vorgeschlagen hat. Eingabe ist das `ctx`-Feld aus dem
+        `gis`-Block eines `WALK`-Abschnitts einer `TripSearch`.
+
+        **Response:** `res.conL[0]` — eine Verbindung aus genau einem
+        `WALK`-Abschnitt mit `gis.dist` (Meter) und `dur`, dazu
+        `common.polyL[0].crdEncYX` als Google-Polyline. Im Test: 148 m Fußweg
+        → 5 Stützpunkte, also echte Straßengeometrie statt Luftlinie.
+
+        ⚠️ **Selbstgebaute `gisCtx`-Strings werden abgelehnt** (`FAIL`) —
+        getestet mit Steig-IDs, Master-IDs und reinen Koordinaten. Der Server
+        akzeptiert nur Token, die er selbst ausgegeben hat.
+
+        Gültige Felder: `gisCtx`, `date`, `time`, `depLoc`, `arrLoc`
+        (**Singular**, Plural → `HAMM`), `gisFltrL`, `getPolyline`,
+        `getDescription`, `getEco`. Der Weg über `depLoc`/`arrLoc` kommt nie
+        über `PARAMETER` hinaus — nur `gisCtx` führt zum Ziel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GisRouteEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: GisRoute
+                  req:
+                    gisCtx: "H|1|W$A=1@O=Köln Zollstock Südfriedhof@L=300005701@a=128@$…|#VE#2#CF#100#…"
+                    getPolyline: true
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#HimSearch:
+    post:
+      tags: [Störungen]
+      operationId: HimSearch
+      summary: Störungsmeldungen suchen
+      description: |
+        **Funktioniert mit leerem Filter:** `himFltrL: []` liefert alle aktuell
+        aktiven Meldungen netzweit statt eines Fehlers.
+
+        **Response** (`res.msgL[]`), pro Meldung u.a.:
+
+        | Feld | Bedeutung |
+        |------|-----------|
+        | `text` | Meldungstext (Klartext, oft mit `(H)` für Haltestelle) |
+        | `cat` | `1` = Aufzug/Fahrzeuge außer Betrieb, `3` = Baumaßnahme/Verlegung, `99` = **Marketing** (KVB-Werbung — rausfiltern!) |
+        | `prio` | Priorität |
+        | `sDate`/`eDate` | Gültigkeitszeitraum (`YYYYMMDD`) |
+        | `fLocX`/`tLocX` | Index in `res.common.locL[]` — betroffene Haltestelle(n), falls vorhanden |
+        | `prod` | Verkehrsmittel-Bitmaske — **keine** Linien-Angabe; betroffene Linien stehen nur im Klartext und nur in ~8% der Meldungen |
+
+        **Filter nach Linie funktioniert** mit `{type: "LINE", mode: "INC",
+        value: "133"}` — `mode: "INC"` ist Pflicht, sonst wird der Filter
+        stillschweigend ignoriert. Unbekanntes Label → leere `msgL`, kein
+        Fehler. `type: "LINEID"` und `"STATION"` → `PARSE`.
+
+        ⚠️ **Kein funktionierender Filter nach Haltestelle.** Neben `LINE`
+        funktionieren nur `PROD` (Verkehrsmittel-Bitmaske) und `REG` mit
+        numerischem Wert. Client-seitiges Filtern (Loc-Referenzen über
+        `eventRefL` plus Textabgleich auf den Haltestellennamen) ist der
+        pragmatische Workaround.
+
+        Weitere Felder: `maxNum`, `dateB`/`dateE`, `timeB`/`timeE`,
+        `onlyToday`, `onlyHimId`. `sortL` und `getPolyline` → `PARSE`.
+        **Historie gibt es nicht** — in keinem getesteten Zeitfenster kam eine
+        bereits abgelaufene Meldung zurück.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HimSearchEnvelope'
+            examples:
+              alle:
+                summary: Alle aktiven Meldungen (leerer Filter)
+                value:
+                  id: "1@"
+                  ver: "1.16"
+                  lang: deu
+                  auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+                  client: {id: HAFAS, type: WEB}
+                  svcReqL:
+                    - meth: HimSearch
+                      req:
+                        himFltrL: []
+              nachLinie:
+                summary: Nach Linie gefiltert
+                value:
+                  id: "1@"
+                  ver: "1.16"
+                  lang: deu
+                  auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+                  client: {id: HAFAS, type: WEB}
+                  svcReqL:
+                    - meth: HimSearch
+                      req:
+                        himFltrL:
+                          - {type: LINE, mode: INC, value: "133"}
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#HimMatch:
+    post:
+      tags: [Störungen]
+      operationId: HimMatch
+      summary: Aktuell betroffene Haltestellen
+      description: |
+        **Nimmt kein einziges Feld an** — jeder getestete Parameter
+        (`himFltrL`, `input`, `maxNum`, `date`, `locL`, …) endet in `HAMM`.
+
+        **Response:** `res.affStL[]` — die Haltestellen, an denen gerade eine
+        Störung anliegt, als Steig-Einträge (`300xxxxxx`), ohne Koordinaten
+        (`crd` ist `{x: 0, y: 0}`) und mit Dubletten pro Steig. Im Test 1-3
+        Haltestellen, während `HimSearch` 86 Meldungen listete. Das ist die
+        Antwort auf "wo klemmt es gerade", nicht auf "welche Meldungen gibt es".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HimMatchEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: HimMatch
+                  req: {}
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#HimGeoPos:
+    post:
+      tags: [Störungen]
+      operationId: HimGeoPos
+      summary: Störungen im Kartenausschnitt
+      description: |
+        Der geografische Gegenentwurf zum fehlenden Haltestellen-Filter von
+        `HimSearch`.
+
+        ⚠️ Antwortet mit `OK`, war für Köln in allen Tests aber **leer** — hier
+        tauchen nur Meldungen mit echtem Geo-Bezug auf, und der Großteil der
+        KVB-Meldungen nennt die Haltestelle nur im Klartext. `getPolys` und
+        `maxNum` → `HAMM`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HimGeoPosEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: HimGeoPos
+                  req:
+                    rect:
+                      llCrd: {x: 6750000, y: 50830000}
+                      urCrd: {x: 7150000, y: 51050000}
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#LineMatch:
+    post:
+      tags: [Linien]
+      operationId: LineMatch
+      summary: Linien suchen
+      description: |
+        **Response** (`res.lineL[]`): `{lineId, prodX}`, das Produkt in
+        `common.prodL[]`. Weitere Felder wie `type: "S"` → `HAMM`.
+
+        ⚠️ Der Datenbestand geht **weit über die KVB hinaus**: `"1"` trifft
+        auch `de:aac:…` (Aachen), `de:vrr:…` (VRR) und `nl:ln:…`
+        (Niederlande). Köln/Bonn ist `de:vrs:`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LineMatchEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LineMatch
+                  req:
+                    input: "18"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#LineDetails:
+    post:
+      tags: [Linien]
+      operationId: LineDetails
+      summary: Linie im Detail (inkl. Statistik-Block)
+      description: |
+        Nur die volle `lineId` funktioniert — `"18"` → `FAIL` ("line not
+        found"). Zusätzliche Felder (`date`, `getStopL`, `getPolyline`) →
+        `HAMM`.
+
+        **Response:** `res.common.prodL[0]` mit `prodCtx` (`catOut`:
+        `"Str"`/`"Bus"`, `line`, `lineId`), `oprX` → Betreiber in
+        `common.opL`, und einem `stat`-Block:
+
+        | Feld | Bedeutung | KVB-Wert (2026-09-16) |
+        |------|-----------|------------------------|
+        | `cnt` | Fahrten im Fahrplan | 1062 (Linie 18) |
+        | `cncl` | Ausfälle | 0 |
+        | `ont` | pünktliche Fahrten | 0 |
+        | `rt` | Fahrten mit Echtzeitdaten | 0 |
+        | `him` | Fahrten mit Störungsmeldung | 0 |
+        | `delGrpL` | Minuten-Grenzen des Verspätungs-Histogramms | `[1,2,3,…,10,15,20,30]` |
+        | `delCntL` | Anzahl Fahrten pro Grenze | alles 0 |
+
+        Das Schema für eine Pünktlichkeitsstatistik ist da, aber außer `cnt`
+        füllt die KVB nichts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LineDetailsEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LineDetails
+                  req:
+                    lineId: "de:vrs:18"
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#LineGeoPos:
+    post:
+      tags: [Linien]
+      operationId: LineGeoPos
+      summary: Linien im Umkreis
+      description: |
+        `ring` **oder** `rect`, beides funktioniert. `date`/`time`/`jnyFltrL`
+        werden angenommen, lösen aber `PARAMETER` aus; `maxLoc`, `maxLine`,
+        `getPolyline`, `onlyRT` → `HAMM`.
+
+        **Response** (`res.lineL[]`): `{lineId, prodX, locX, jnyL}` — pro Linie
+        ein Eintrag plus Beispielfahrten mit `stopL`.
+
+        - **Deckel bei 50 Linien** pro Anfrage, unabhängig von der
+          Rechteckgröße. Für ein ganzes Netz müsste man kacheln.
+        - **Vollständiger als `LocDetails.pRefL`**: Am Neumarkt liefert `pRefL`
+          9 Linien, `LineGeoPos` im 300-m-Ring 14 — die Nachtlinien fehlen in
+          `pRefL`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LineGeoPosEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LineGeoPos
+                  req:
+                    ring:
+                      cCrd: {x: 6948329, y: 50935667}
+                      maxDist: 300
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+  /gate#ServerInfo:
+    post:
+      tags: [System]
+      operationId: ServerInfo
+      summary: Fahrplanperiode und Serverzeit
+      description: |
+        Kürzeste Methode der ganzen API, ohne Parameter.
+
+        **Response:** `fpB`/`fpE` = Anfang/Ende der aktuellen Fahrplanperiode
+        (getestet am 2026-09-16: `20251214` – `20261212`), `sD`/`sT` =
+        Serverdatum und -zeit. Damit muss die Periodengrenze nicht per
+        Binärsuche über `H9360`-Fehler ermittelt werden.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerInfoEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: ServerInfo
+                  req: {}
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
+
+components:
+  responses:
+    Gate:
+      description: |
+        HAFAS antwortet **immer** mit HTTP 200 — Fehler stehen in `err`,
+        entweder in `svcResL[0].err` (Methoden-Ebene) oder im Top-Level-Objekt
+        (Envelope-Ebene, z.B. bei `PARSE`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GateResponse'
+
+  schemas:
+    Crd:
+      type: object
+      description: Koordinate, beide Werte `* 1_000_000`.
+      properties:
+        x: {type: integer, description: Longitude * 1e6, examples: [6959800]}
+        y: {type: integer, description: Latitude * 1e6, examples: [50936600]}
+      required: [x, y]
+
+    Ring:
+      type: object
+      description: Kreis um einen Mittelpunkt.
+      properties:
+        cCrd: {$ref: '#/components/schemas/Crd'}
+        maxDist: {type: integer, description: Radius in Metern, examples: [500]}
+        minDist: {type: integer, description: Innenradius in Metern}
+      required: [cCrd]
+
+    Rect:
+      type: object
+      description: Bounding-Box aus unterer linker und oberer rechter Ecke.
+      properties:
+        llCrd: {$ref: '#/components/schemas/Crd'}
+        urCrd: {$ref: '#/components/schemas/Crd'}
+      required: [llCrd, urCrd]
+
+    LocRef:
+      type: object
+      description: |
+        Ortsreferenz. Die meisten Methoden nehmen `{"extId": "900000002"}`,
+        `LocDetails` und `LocGeoReach` verlangen die `lid`-Form
+        `A=1@L=<extId>@`.
+      properties:
+        extId: {type: string, description: Master-Haltestellen-ID, examples: ["900000002"]}
+        lid: {type: string, examples: ["A=1@L=900000002@"]}
+        type: {type: string, enum: [S, A, P], description: "S = Station, A = Adresse, P = POI"}
+        name: {type: string}
+      additionalProperties: true
+
+    Auth:
+      type: object
+      description: |
+        Kein Checksum/Salt nötig (manche HAFAS-Installationen verlangen
+        zusätzlich ein `mac`-Feld — KVB nicht). Die `aid` ist Teil des
+        öffentlich ausgelieferten Frontend-JS, keine geheime Anmeldeinformation.
+      properties:
+        type: {type: string, const: AID}
+        aid: {type: string, const: Rt6foY5zcTTRXMQs}
+      required: [type, aid]
+
+    Client:
+      type: object
+      properties:
+        id: {type: string, const: HAFAS}
+        type: {type: string, const: WEB}
+
+    EnvelopeBase:
+      type: object
+      description: Basis-Envelope, identisch für jede Methode.
+      properties:
+        id: {type: string, description: Beliebige Request-ID, examples: ["1@"]}
+        ver: {type: string, description: Protokollversion, examples: ["1.16"]}
+        lang: {type: string, examples: [deu]}
+        auth: {$ref: '#/components/schemas/Auth'}
+        client: {$ref: '#/components/schemas/Client'}
+      required: [auth, svcReqL]
+
+    LocMatchReq:
+      type: object
+      properties:
+        input:
+          type: object
+          properties:
+            field: {type: string, const: S}
+            loc:
+              type: object
+              properties:
+                name: {type: string, description: "Suchbegriff, `?` am Ende aktiviert Prefix-Matching", examples: ["Neumarkt?"]}
+                type: {type: string, const: S}
+            maxLoc: {type: integer, examples: [5]}
+          required: [loc]
+      required: [input]
+
+    LocGeoPosReq:
+      type: object
+      properties:
+        ring: {$ref: '#/components/schemas/Ring'}
+        maxLoc: {type: integer, examples: [10]}
+      required: [ring]
+
+    LocDetailsReq:
+      type: object
+      properties:
+        locL:
+          type: array
+          items: {$ref: '#/components/schemas/LocRef'}
+      required: [locL]
+
+    LocGeoReachReq:
+      type: object
+      properties:
+        loc: {$ref: '#/components/schemas/LocRef'}
+        maxDur: {type: integer, description: Reisezeit-Budget in Minuten, examples: [15]}
+        maxChg: {type: integer, description: maximale Umstiege, examples: [0]}
+        date: {type: string, pattern: '^\d{8}$', examples: ["20260916"]}
+        time: {type: string, pattern: '^\d{6}$', examples: ["120000"]}
+      required: [loc, maxDur]
+
+    StationBoardReq:
+      type: object
+      properties:
+        type: {type: string, enum: [DEP, ARR], description: Abfahrten oder Ankünfte}
+        stbLoc: {$ref: '#/components/schemas/LocRef'}
+        maxJny: {type: integer, examples: [10]}
+        date: {type: string, pattern: '^\d{8}$', description: "optional, nur innerhalb der aktuellen Fahrplanperiode"}
+        time: {type: string, pattern: '^\d{6}$', description: optional}
+      required: [type, stbLoc]
+
+    JourneyDetailsReq:
+      type: object
+      properties:
+        jid: {type: string, description: Journey-ID aus StationBoard/TripSearch, examples: ["1|2100|1|1|15092026"]}
+        getPolyline: {type: boolean}
+        getPasslist: {type: boolean}
+      required: [jid]
+
+    JourneyMatchReq:
+      type: object
+      properties:
+        input: {type: string, description: Linienbezeichnung, examples: ["18"]}
+        date: {type: string, pattern: '^\d{8}$', description: Pflicht}
+        time: {type: string, pattern: '^\d{6}$', description: Pflicht}
+      required: [input, date, time]
+
+    JourneyGeoPosReq:
+      type: object
+      properties:
+        rect: {$ref: '#/components/schemas/Rect'}
+        maxJny: {type: integer, examples: [100]}
+        onlyRT: {type: boolean}
+        perSize: {type: integer, description: Länge des Animations-Tracks in ms, examples: [120000]}
+        perStep: {type: integer, description: Auflösung des Animations-Tracks in ms, examples: [30000]}
+        ageOfReport: {type: boolean}
+        trainPosMode: {type: string, enum: [CALC], description: "HAFAS rechnet die Position hoch, keine GPS-Rohdaten"}
+      required: [rect]
+
+    JourneyCourseReq:
+      type: object
+      properties:
+        jid: {type: string, examples: ["1|4809|1|1|16092026"]}
+      required: [jid]
+
+    TripSearchReq:
+      type: object
+      properties:
+        depLocL:
+          type: array
+          items: {$ref: '#/components/schemas/LocRef'}
+        arrLocL:
+          type: array
+          items: {$ref: '#/components/schemas/LocRef'}
+        outDate: {type: string, pattern: '^\d{8}$', examples: ["20260916"]}
+        outTime: {type: string, pattern: '^\d{6}$', examples: ["120000"]}
+      required: [depLocL, arrLocL]
+
+    ReconstructionReq:
+      type: object
+      properties:
+        ctxRecon: {type: string, description: Token aus einer TripSearch-Verbindung}
+        outReconL:
+          type: array
+          description: Alternative Request-Form, identisches Ergebnis
+          items:
+            type: object
+            properties:
+              ctx: {type: string}
+
+    SearchOnTripReq:
+      type: object
+      properties:
+        ctxRecon: {type: string, description: Token aus einer TripSearch-Verbindung}
+        sotMode: {type: string, enum: [RC], description: "ändert nichts am Ergebnis; `JI` scheitert"}
+      required: [ctxRecon]
+
+    GisRouteReq:
+      type: object
+      properties:
+        gisCtx: {type: string, description: "`gis.ctx` eines WALK-Abschnitts. Selbstgebaute Token werden abgelehnt."}
+        getPolyline: {type: boolean}
+        getDescription: {type: boolean}
+        getEco: {type: boolean}
+        date: {type: string, pattern: '^\d{8}$'}
+        time: {type: string, pattern: '^\d{6}$'}
+        depLoc: {$ref: '#/components/schemas/LocRef'}
+        arrLoc: {$ref: '#/components/schemas/LocRef'}
+      required: [gisCtx]
+
+    HimFilter:
+      type: object
+      properties:
+        type: {type: string, enum: [LINE, PROD, REG], description: "Nur diese drei funktionieren zuverlässig. `STATION`/`LINEID` → PARSE."}
+        mode: {type: string, const: INC, description: "Pflicht — ohne `mode` wird der Filter stillschweigend ignoriert."}
+        value: {type: string, examples: ["133"]}
+      required: [type, mode, value]
+
+    HimSearchReq:
+      type: object
+      properties:
+        himFltrL:
+          type: array
+          description: "Leeres Array = alle aktiven Meldungen netzweit."
+          items: {$ref: '#/components/schemas/HimFilter'}
+        maxNum: {type: integer}
+        dateB: {type: string, pattern: '^\d{8}$'}
+        dateE: {type: string, pattern: '^\d{8}$'}
+        timeB: {type: string, pattern: '^\d{6}$'}
+        timeE: {type: string, pattern: '^\d{6}$'}
+        onlyToday: {type: boolean}
+        onlyHimId: {type: string}
+      required: [himFltrL]
+
+    HimMatchReq:
+      type: object
+      description: Nimmt kein einziges Feld an — jeder Parameter endet in HAMM.
+      additionalProperties: false
+
+    HimGeoPosReq:
+      type: object
+      properties:
+        rect: {$ref: '#/components/schemas/Rect'}
+      required: [rect]
+
+    LineMatchReq:
+      type: object
+      properties:
+        input: {type: string, examples: ["18"]}
+      required: [input]
+
+    LineDetailsReq:
+      type: object
+      properties:
+        lineId: {type: string, description: "volle ID nötig, Köln/Bonn = `de:vrs:`", examples: ["de:vrs:18"]}
+      required: [lineId]
+
+    LineGeoPosReq:
+      type: object
+      properties:
+        ring: {$ref: '#/components/schemas/Ring'}
+        rect: {$ref: '#/components/schemas/Rect'}
+
+    ServerInfoReq:
+      type: object
+      description: Ohne Parameter.
+      additionalProperties: false
+
+    LocMatchEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LocMatch}
+                  req: {$ref: '#/components/schemas/LocMatchReq'}
+
+    LocGeoPosEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LocGeoPos}
+                  req: {$ref: '#/components/schemas/LocGeoPosReq'}
+
+    LocDetailsEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LocDetails}
+                  req: {$ref: '#/components/schemas/LocDetailsReq'}
+
+    LocGeoReachEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LocGeoReach}
+                  req: {$ref: '#/components/schemas/LocGeoReachReq'}
+
+    StationBoardEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: StationBoard}
+                  req: {$ref: '#/components/schemas/StationBoardReq'}
+
+    JourneyDetailsEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: JourneyDetails}
+                  req: {$ref: '#/components/schemas/JourneyDetailsReq'}
+
+    JourneyMatchEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: JourneyMatch}
+                  req: {$ref: '#/components/schemas/JourneyMatchReq'}
+
+    JourneyGeoPosEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: JourneyGeoPos}
+                  req: {$ref: '#/components/schemas/JourneyGeoPosReq'}
+
+    JourneyCourseEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: JourneyCourse}
+                  req: {$ref: '#/components/schemas/JourneyCourseReq'}
+
+    TripSearchEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: TripSearch}
+                  req: {$ref: '#/components/schemas/TripSearchReq'}
+
+    ReconstructionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: Reconstruction}
+                  req: {$ref: '#/components/schemas/ReconstructionReq'}
+
+    SearchOnTripEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: SearchOnTrip}
+                  req: {$ref: '#/components/schemas/SearchOnTripReq'}
+
+    GisRouteEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: GisRoute}
+                  req: {$ref: '#/components/schemas/GisRouteReq'}
+
+    HimSearchEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: HimSearch}
+                  req: {$ref: '#/components/schemas/HimSearchReq'}
+
+    HimMatchEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: HimMatch}
+                  req: {$ref: '#/components/schemas/HimMatchReq'}
+
+    HimGeoPosEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: HimGeoPos}
+                  req: {$ref: '#/components/schemas/HimGeoPosReq'}
+
+    LineMatchEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LineMatch}
+                  req: {$ref: '#/components/schemas/LineMatchReq'}
+
+    LineDetailsEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LineDetails}
+                  req: {$ref: '#/components/schemas/LineDetailsReq'}
+
+    LineGeoPosEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LineGeoPos}
+                  req: {$ref: '#/components/schemas/LineGeoPosReq'}
+
+    ServerInfoEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: ServerInfo}
+                  req: {$ref: '#/components/schemas/ServerInfoReq'}
+
+    GateResponse:
+      type: object
+      properties:
+        ver: {type: string}
+        lang: {type: string}
+        id: {type: string}
+        err: {type: string, description: "Nur bei Envelope-Fehlern gesetzt (z.B. `PARSE`), sonst steht der Fehler in `svcResL[].err`."}
+        svcResL:
+          type: array
+          description: Ein Eintrag pro angefragter Methode, in derselben Reihenfolge.
+          items:
+            type: object
+            properties:
+              meth: {type: string}
+              err: {type: string, examples: [OK]}
+              errTxt: {type: string}
+              res:
+                type: object
+                description: Methodenspezifische Nutzdaten, siehe Beschreibung der jeweiligen Operation.
+                properties:
+                  common: {$ref: '#/components/schemas/Common'}
+                additionalProperties: true
+
+    Common:
+      type: object
+      description: |
+        Gemeinsamer Pool, auf den die Nutzdaten per Index verweisen
+        (`locX` → `locL`, `prodX` → `prodL`, …). Immer zuerst auflösen.
+      properties:
+        locL:
+          type: array
+          description: "Orte. Enthält pro Haltestelle einen Steig-Eintrag (`300xxxxxx`) und über `mMastLocX` einen Master-Eintrag (`900xxxxxx`)."
+          items: {type: object, additionalProperties: true}
+        prodL:
+          type: array
+          description: "Produkte/Linien, `name` = Linienbezeichnung."
+          items: {type: object, additionalProperties: true}
+        opL:
+          type: array
+          description: Betreiber.
+          items: {type: object, additionalProperties: true}
+        polyL:
+          type: array
+          description: "Polylines, `crdEncYX` als Google-Encoded-Polyline (Faktor 1e5)."
+          items: {type: object, additionalProperties: true}
+        himL:
+          type: array
+          description: Störungsmeldungen.
+          items: {type: object, additionalProperties: true}
+      additionalProperties: true

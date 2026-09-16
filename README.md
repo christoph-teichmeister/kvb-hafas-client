@@ -113,6 +113,11 @@ Die Library selbst hängt nur an `requests`. Die CLI nutzt zusätzlich `question
 **Vollständige API-Referenz mit allen Feldern, Beispiel-Requests und
 Fehlercodes:** [docs/API.md](docs/API.md)
 
+Dieselbe Referenz als OpenAPI-Spec zum Durchklicken (Swagger UI):
+**[christoph-teichmeister.github.io/kvb-hafas-client](https://christoph-teichmeister.github.io/kvb-hafas-client/)**
+— Quelle: [docs/openapi.yaml](docs/openapi.yaml). „Try it out" ist bewusst
+deaktiviert (CORS, und es ist KVB-Produktions-Infrastruktur).
+
 ## Tests
 
 ```bash

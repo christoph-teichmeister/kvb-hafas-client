@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KVB HAFAS API — inoffizielle Referenz</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #fafafa; }
+    .kvb-banner {
+      background: #c8102e; color: #fff; padding: .9rem 1.4rem;
+      font: 15px/1.5 system-ui, sans-serif;
+    }
+    .kvb-banner a { color: #fff; }
+    .kvb-banner strong { letter-spacing: .02em; }
+    .swagger-ui .topbar { display: none; }
+  </style>
+</head>
+<body>
+  <div class="kvb-banner">
+    <strong>Inoffiziell.</strong> Reverse-engineerter HAFAS-Endpoint der KVB —
+    nicht von der KVB freigegeben, nicht kommerziell nutzen, Rate-Limiting einhalten.
+    „Try it out“ ist bewusst deaktiviert (CORS + Produktions-Infrastruktur).
+    Quelle: <a href="https://github.com/christoph-teichmeister/kvb-hafas-client">kvb-hafas-client</a>
+  </div>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: 'openapi.yaml',
+      dom_id: '#swagger-ui',
+      deepLinking: true,
+      supportedSubmitMethods: [],
+      docExpansion: 'list',
+      defaultModelsExpandDepth: 0,
+      tryItOutEnabled: false,
+      presets: [SwaggerUIBundle.presets.apis],
+    });
+  </script>
+</body>
+</html>
