@@ -439,6 +439,20 @@ paths:
         und `secL[]` (Teilstrecken/Umstiege). Jede Verbindung bringt ein
         `ctxRecon`-Token mit, Eingabe für `Reconstruction` und `SearchOnTrip`.
         `WALK`-Abschnitte enthalten unter `gis.ctx` das Token für `GisRoute`.
+
+        **Optionen:** `numF` (Anzahl, Server liefert auch mal eine mehr),
+        `ctxScr` (Blättern mit `outCtxScrF`/`outCtxScrB` der Antwort, Locations
+        müssen mit), `viaLocL[].loc` (Zwischenhalt, Via == Ziel → `H9380`),
+        `jnyFltrL` (`{type: PROD, mode: INC, value: "<bitmaske als String>"}`).
+        Bitmaske = `cls` aus `common.prodL[]`: 1 S-Bahn, 2 Stadtbahn, 8 Bus,
+        16 Regionalzug, 32 Fernzug, 128 Fähre, 256 AST/Taxi. Leeres Ergebnis
+        durch Filter → `H890`.
+
+        **Preis:** ungefragt mit dabei, kein Request-Feld nötig. Je Verbindung
+        `trfRes.fareSetL[].fareL[]` (`prc` in Cent, `cur`, `name` =
+        Rheinlandtarif-Preisstufe); `ovwTrfRefL[0]` zeigt mit
+        `fareSetX`/`fareX` auf den gültigen Eintrag. Reine Fußweg-Verbindungen
+        haben kein `trfRes`. Einzige funktionierende Preisquelle der API.
       requestBody:
         required: true
         content:
@@ -783,6 +797,36 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/Gate'}
 
+  /gate#LineSearch:
+    post:
+      tags: [Linien]
+      operationId: LineSearch
+      summary: Kompletter Linienkatalog
+      description: |
+        Leerer `req` — liefert **den gesamten Linienbestand** in einem Request:
+        3125 Linien in `res.lineL[]` (`lineId`, `prodX` → `common.prodL`,
+        `locX` → Referenz-Haltestelle in `common.locL`), davon 710 mit Präfix
+        `de:vrs:` (Köln/Bonn).
+
+        Im Gegensatz zu `LineMatch` ohne Suchbegriff. `LineList` & Co.
+        existieren nicht (`HAMM`) — das hier ist der Weg.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LineSearchEnvelope'
+            example:
+              id: "1@"
+              ver: "1.16"
+              lang: deu
+              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              client: {id: HAFAS, type: WEB}
+              svcReqL:
+                - meth: LineSearch
+                  req: {}
+      responses:
+        '200': {$ref: '#/components/responses/Gate'}
   /gate#LineGeoPos:
     post:
       tags: [Linien]
@@ -1365,6 +1409,19 @@ components:
                 properties:
                   meth: {type: string, const: LineGeoPos}
                   req: {$ref: '#/components/schemas/LineGeoPosReq'}
+
+    LineSearchEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeBase'
+        - type: object
+          properties:
+            svcReqL:
+              type: array
+              items:
+                type: object
+                properties:
+                  meth: {type: string, const: LineSearch}
+                  req: {type: object, description: Leer — LineSearch nimmt keine Felder, maxNum/input → HAMM}
 
     ServerInfoEnvelope:
       allOf:

@@ -153,15 +153,20 @@ uv run -m timetable.analyze --db timetable.db
 | Linienverlauf als Polyline (`journey_course`)                    | ✅ ein Punkt pro Halt, Google-Encoded-Polyline                                                           |
 | Offizielle Linienfarben                                          | ✅ aus `common.icoL`                                                                                     |
 | Liniensuche & -details (`find_lines`, `line_details`)            | ⚠️ inkl. Betreiber und Fahrtenzahl; Pünktlichkeitsstatistik von KVB nicht befüllt                        |
+| Kompletter Linienkatalog (`all_lines`)                           | ✅ 3125 Linien in einem Request, davon 710 `de:vrs` (Köln/Bonn)                                          |
 | Fahrten einer Linie inkl. Verkehrstage (`find_journeys`)         | ✅ `sDaysI` im Klartext                                                                                  |
 | Fahrplanperiode / Serverzeit (`server_info`)                     | ✅                                                                                                       |
 | Push-Abos (`Subscr*`)                                            | ⚠️ brauchen ein Nutzerkonto; einzige schreibende Methoden, bewusst nicht angefasst                       |
 | Historische Daten jeder Art                                      | ❌ kein Archiv — [Details](docs/API.md#historische-daten)                                                |
-| Auslastungsdaten                                                 | ❌ nicht gefunden                                                                                        |
-| Tarife/Preise                                                    | ❌ keine erreichbare Preis-Methode                                                                       |
+| Auslastungsdaten                                                 | ❌ `tcocL` & Co. kommen leer zurück                                                                      |
+| Verbindungs-Optionen (`num`, `via_ext_id`, `products`)           | ✅ Anzahl, Zwischenhalt, Verkehrsmittelfilter über `kvb_hafas.PRODUCTS`                                  |
+| Früher/später blättern (`trip_page`)                             | ✅ `ctx_earlier`/`ctx_later`, wie das „früher/später" der offiziellen Auskunft                           |
+| Tarife/Preise (`Connection.fare_cents`)                          | ✅ Rheinlandtarif-Preisstufe, kommt gratis mit jeder `trip_search()`                                     |
 
 **Vollständige API-Referenz mit allen Feldern, Beispiel-Requests und
-Fehlercodes:** [docs/API.md](docs/API.md)
+Fehlercodes:** [docs/API.md](docs/API.md) — inklusive
+[Inventar aller 47 existierenden HAFAS-Methoden](docs/API.md#methoden-inventar)
+mit Status, Client-Abdeckung und Fehlercode auf leeren Request.
 
 Dieselbe Referenz als OpenAPI-Spec zum Durchklicken (Swagger UI):
 **[christoph-teichmeister.github.io/kvb-hafas-client](https://christoph-teichmeister.github.io/kvb-hafas-client/)**

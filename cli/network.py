@@ -11,11 +11,9 @@ from cli.format import ddmm, hhmm
 from cli.ui import ask, choose, console, panel
 
 def show_line(client: KVBHafasClient) -> None:
-    query = ask("Linie suchen (z.B. 18, 146)")
-    if not query:
-        return
+    query = ask("Linie suchen (z.B. 18, 146; leer = alle Köln/Bonn-Linien)")
     with console.status("[cyan]Suche Linien…"):
-        lines = client.find_lines(query)
+        lines = client.find_lines(query) if query else client.all_lines("de:vrs")
     if not lines:
         console.print("[dim]Keine Linie gefunden.[/]")
         return

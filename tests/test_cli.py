@@ -2,7 +2,9 @@
 
 from cli.format import dur_min
 from cli.trips import dedupe_connections, merge_walks
-from kvb_hafas import Connection, Leg
+from unittest.mock import MagicMock
+
+from kvb_hafas import Connection, Leg, Stop, TripPage
 
 
 def _walk(from_name: str, to_name: str, dep: str, arr: str, dist_m: int) -> Leg:
@@ -42,3 +44,41 @@ def test_dur_min_formats_hafas_duration():
     assert dur_min("000200") == "2 min"
     assert dur_min("011500") == "75 min"
     assert dur_min("") == "—"
+
+
+def _con(dep, arr):
+    return Connection(dep_time=dep, arr_time=arr, num_changes=0, legs=[])
+
+
+def test_show_trip_pages_forward_then_exits(monkeypatch):
+    """Die Menü-Indizes hinter den Verbindungen: frühere / spätere / zurück."""
+    from cli import trips
+
+    page1 = TripPage(connections=[_con("120000", "121000"), _con("123000", "124000")], ctx_later="fwd")
+    page2 = TripPage(connections=[_con("130000", "131000")], ctx_later="fwd2")
+    pages = [page1, page2]
+    calls = []
+
+    class FakeClient:
+        def trip_page(self, *args, **kwargs):
+            calls.append(kwargs.get("scroll_ctx"))
+            return pages[len(calls) - 1]
+
+    stop = Stop(name="Köln Neumarkt", ext_id="900000002")
+    # Start, Ziel, dann Via = None (leere Eingabe = kein Zwischenhalt).
+    stops = iter([stop, stop, None])
+    monkeypatch.setattr(trips, "pick_stop", lambda *a, **k: next(stops))
+    monkeypatch.setattr(trips, "ask", lambda *a, **k: "20260916")
+    monkeypatch.setattr(trips, "pick_products", lambda: None)
+    monkeypatch.setattr(trips, "console", MagicMock())
+    monkeypatch.setattr(trips, "panel", lambda *a, **k: None)
+    monkeypatch.setattr(trips, "connection_tree", lambda con: None)
+
+    # "spätere" auf Seite 1 (Index 2 bei 2 Verbindungen), dann "zurück" auf
+    # Seite 2 (Index 3 bei 1 Verbindung).
+    choices = iter([3, 3])
+    monkeypatch.setattr(trips, "choose", lambda *a, **k: next(choices))
+
+    trips.show_trip(FakeClient())
+
+    assert calls == [None, "fwd"]

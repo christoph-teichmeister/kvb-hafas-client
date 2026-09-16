@@ -9,7 +9,7 @@ from rich.markup import escape as esc
 from rich.table import Table
 from rich.tree import Tree
 
-from kvb_hafas import Connection, KVBHafasClient, Leg
+from kvb_hafas import PRODUCTS, Connection, KVBHafasClient, KVBHafasError, Leg, TripPage
 
 from cli.format import dur_min, hhmm
 from cli.ui import ask, choose, console, panel, pick_stop
@@ -38,7 +38,11 @@ def merge_walks(legs: list[Leg]) -> list[Leg]:
 def connection_tree(con: Connection) -> Tree:
     """Eine Verbindung als Baum: Fahrten mit Ein-/Ausstieg, dazwischen Fußwege."""
     changes = f"{con.num_changes} Umstieg{'e' if con.num_changes != 1 else ''}"
-    tree = Tree(f"[bold]{hhmm(con.dep_time)} → {hhmm(con.arr_time)}[/]  [dim]· {changes}[/]", guide_style="dim")
+    fare = f" · {con.fare_cents / 100:.2f} {con.fare_currency} ({con.fare_name})" if con.fare_cents else ""
+    tree = Tree(
+        f"[bold]{hhmm(con.dep_time)} → {hhmm(con.arr_time)}[/]  [dim]· {changes}{esc(fare)}[/]",
+        guide_style="dim",
+    )
     for leg in merge_walks(con.legs):
         if leg.walk:
             dist = f", {leg.dist_m} m" if leg.dist_m else ""
@@ -129,6 +133,20 @@ def show_connection_detail(client: KVBHafasClient, con: Connection) -> None:
             console.print(panel("Aktualisiert", connection_tree(con)))
 
 
+def pick_products() -> int | None:
+    """Verkehrsmittel-Filter als Bitmaske, None = alles erlauben."""
+    labels = ["alle", "nur Stadtbahn", "nur Bus", "Stadtbahn + Bus", "ohne Fernzug/Taxi"]
+    masks = [
+        None,
+        PRODUCTS["stadtbahn"],
+        PRODUCTS["bus"],
+        PRODUCTS["stadtbahn"] | PRODUCTS["bus"],
+        PRODUCTS["s_bahn"] | PRODUCTS["stadtbahn"] | PRODUCTS["bus"] | PRODUCTS["regionalzug"],
+    ]
+    idx = choose("Verkehrsmittel", labels)
+    return masks[idx] if idx is not None else None
+
+
 def show_trip(client: KVBHafasClient) -> None:
     start = pick_stop(client, "Start")
     if not start:
@@ -139,17 +157,50 @@ def show_trip(client: KVBHafasClient) -> None:
     now = datetime.now()
     date = ask("Datum (YYYYMMDD)", now.strftime("%Y%m%d"))
     time = ask("Uhrzeit (HHMM)", now.strftime("%H%M"))
-    with console.status("[cyan]Suche Verbindungen…"):
-        cons = client.trip_search(start.ext_id, dest.ext_id, date=date, time=f"{time[:4]}00")
-    title = f"{esc(start.name)} → {esc(dest.name)}"
-    if not cons:
+    # pick_stop() gibt bei leerer Eingabe None zurück — genau das Via-Opt-out.
+    via = pick_stop(client, "Via (leer = ohne)")
+    products = pick_products()
+    title = f"{esc(start.name)} → {esc(dest.name)}" + (f" über {esc(via.name)}" if via else "")
+
+    def search(scroll_ctx: str | None = None) -> TripPage:
+        with console.status("[cyan]Suche Verbindungen…"):
+            return client.trip_page(
+                start.ext_id,
+                dest.ext_id,
+                date=date,
+                time=f"{time[:4]}00",
+                via_ext_id=via.ext_id if via else None,
+                products=products,
+                scroll_ctx=scroll_ctx,
+            )
+
+    try:
+        page = search()
+    except KVBHafasError as exc:
+        # H890 = "keine Verbindung" — mit Filter/Via der Normalfall, kein Absturz.
+        console.print(panel(title, f"[dim]keine Verbindung gefunden ({esc(str(exc))})[/]"))
+        return
+    if not page.connections:
         console.print(panel(title, "[dim]keine Verbindung gefunden[/]"))
         return
-    console.print(panel(title, Group(*(connection_tree(con) for con in cons))))
+    console.print(panel(title, Group(*(connection_tree(con) for con in page.connections))))
 
     while True:
+        cons = page.connections
         labels = [f"{hhmm(c.dep_time)} → {hhmm(c.arr_time)}  ({c.num_changes} Ums.)" for c in cons]
-        idx = choose("Verbindung im Detail", [*labels, "zurück"])
-        if idx is None or idx == len(cons):
+        idx = choose("Verbindung im Detail", [*labels, "⏪ frühere", "⏩ spätere", "zurück"])
+        if idx is None or idx == len(cons) + 2:
             return
+        if idx >= len(cons):
+            ctx = page.ctx_earlier if idx == len(cons) else page.ctx_later
+            if not ctx:
+                console.print("[dim]Kein weiterer Zeitraum verfügbar.[/]")
+                continue
+            try:
+                page = search(ctx)
+            except KVBHafasError:
+                console.print("[dim]Kein weiterer Zeitraum verfügbar.[/]")
+                continue
+            console.print(panel(title, Group(*(connection_tree(con) for con in page.connections))))
+            continue
         show_connection_detail(client, cons[idx])

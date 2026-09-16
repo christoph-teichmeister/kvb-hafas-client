@@ -32,6 +32,7 @@ ANCHORS = {
 }
 
 BOARD_MAX = 1000  # serverseitig durch die Dichte des Halts gedeckelt
+CHUNK = 10  # Fahrten pro POST; das Gate nimmt mehrere svcReqL-Einträge an
 MAX_PLAUSIBLE_GAP_MIN = 60  # größere Lücke im Tagesverkehr = abgeschnittene Tafel
 
 
@@ -137,19 +138,25 @@ def main() -> int:
     print(f"\n{len(jids)} Fahrten gefunden, {len(jids) - len(todo)} bereits in der DB, {len(todo)} zu holen.")
 
     failed = 0
-    for n, jid in enumerate(todo, 1):
+    done_cnt = 0
+    # Gebündelt: ein POST pro CHUNK Fahrten statt pro Fahrt — das spart vor allem
+    # die min_interval-Pause, die sonst jede einzelne Fahrt kostet.
+    for start in range(0, len(todo), CHUNK):
+        batch = todo[start : start + CHUNK]
         try:
-            route = client.journey_route(jid)
+            routes = client.journey_routes(batch, chunk=CHUNK)
         except (KVBHafasError, requests.RequestException) as exc:
             # Ein einzelner Aussetzer darf den Lauf nicht kosten — beim nächsten
-            # Aufruf wird die Fahrt erneut versucht, weil sie nicht in der DB steht.
-            failed += 1
-            print(f"  !! {jid}: {exc}", file=sys.stderr)
+            # Aufruf werden die Fahrten erneut versucht, weil sie nicht in der DB stehen.
+            failed += len(batch)
+            print(f"  !! {batch[0]}…{batch[-1]}: {exc}", file=sys.stderr)
             continue
-        storage.store_route(conn, route)
+        failed += len(batch) - len(routes)  # Teil-Antworten != OK fehlen im Ergebnis
+        for route in routes:
+            storage.store_route(conn, route)
         conn.commit()
-        if n % 25 == 0 or n == len(todo):
-            print(f"  {n}/{len(todo)} Laufwege geholt")
+        done_cnt += len(batch)
+        print(f"  {done_cnt}/{len(todo)} Laufwege geholt")
 
     conn.commit()
     c = storage.counts(conn)

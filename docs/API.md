@@ -25,6 +25,7 @@ Es gibt keine offizielle Doku — alles hier ist selbst getestet, Stand 2026-09-
     - [HimGeoPos — Störungen im Kartenausschnitt](#himgeopos--störungen-im-kartenausschnitt)
     - [HimMatch — aktuell betroffene Haltestellen](#himmatch--aktuell-betroffene-haltestellen)
     - [LineMatch / LineDetails — Linien](#linematch--linedetails--linien)
+- [LineSearch — kompletter Linienkatalog](#linesearch--kompletter-linienkatalog)
     - [LineGeoPos — Linien im Umkreis](#linegeopos--linien-im-umkreis)
     - [ServerInfo — Fahrplanperiode](#serverinfo--fahrplanperiode)
 - [Methoden-Inventar](#methoden-inventar)
@@ -39,7 +40,18 @@ Es gibt keine offizielle Doku — alles hier ist selbst getestet, Stand 2026-09-
 - **Protokoll:** HAFAS `mgate` (JSON-Variante), Hersteller HaCon
 - Request = Envelope mit `svcReqL[]`, je Eintrag `meth` + `req`.
   Response = `svcResL[]` mit `err` (`"OK"` bei Erfolg) und `res`.
-  Mehrere `svcReqL`-Einträge werden in einer Response batch-weise beantwortet.
+  Mehrere `svcReqL`-Einträge werden in einer Response batch-weise beantwortet — **und das funktioniert hier auch
+  wirklich**: ein POST mit 10
+  `JourneyDetails`-Einträgen kommt in ~400 ms zurück, jeder Eintrag mit eigenem
+  `common`-Block, Reihenfolge = Reihenfolge der Anfragen. Gemischte Methoden in
+  einem POST gehen ebenfalls. Das spart nicht nur Roundtrips, sondern vor allem
+  die selbstauferlegte Rate-Limit-Pause pro Fahrt. Client: `_call_many()`,
+  benutzt von `journey_routes()`.
+
+  ⚠️ Fehlerhafte Teil-Anfragen kommen als Eintrag mit `err != "OK"` zurück, der
+  Rest der Batch bleibt gültig. Wer Antworten positionell zuordnet, muss die
+  Länge von `svcResL` gegen die der Anfrage prüfen — sonst rutscht bei einer
+  fehlenden Antwort alles um eine Position.
 - **Auth:** `{"type": "AID", "aid": "Rt6foY5zcTTRXMQs"}` — kein Checksum/Salt (`mac`-Feld) nötig. Die `aid` steht im
   öffentlich ausgelieferten Frontend-JS.
 - **Koordinaten:** `{x, y}`, jeweils `* 1_000_000`; `x` = Longitude, `y` = Latitude.
@@ -358,6 +370,81 @@ Alle Fahrzeuge in einer Bounding-Box.
 (Teilstrecken/Umstiege). Jede Verbindung bringt ein `ctxRecon`-Token mit,
 `WALK`-Abschnitte ein `gis.ctx`.
 
+**Preis:** ungefragt mit dabei, kein Request-Feld nötig — `trfRes` an der
+Verbindung, `ovwTrfRefL` zeigt auf den gültigen Eintrag:
+
+```json
+"ovwTrfRefL": [
+  {
+    "fareSetX": 0,
+    "fareX": 0,
+    "type": "F"
+  }
+],
+"trfRes": {
+  "fareSetL": [
+    {
+      "desc": "Rheinlandtarif",
+      "fareL": [
+        {
+          "cur": "EUR",
+          "name": "Preisstufe K",
+          "prc": 290
+        }
+      ]
+    }
+  ],
+  "statusCode": "OK"
+}
+```
+
+`prc` in Cent. Nicht jede Verbindung hat ein `trfRes` (z.B. reine Fußwege).
+Das ist die einzige funktionierende Preisquelle der API — `TariffSearch` bleibt
+unerreichbar, wird aber auch nicht gebraucht.
+
+**Praktisch nutzbare Optionen** (alle live geprüft):
+
+| Feld       | Wirkung                                                                                                                                                            |
+|------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `numF`     | Gewünschte Anzahl Verbindungen. Der Server liefert auch mal eine mehr (`numF: 6` → 7).                                                                             |
+| `ctxScr`   | Blättern: `outCtxScrF`/`outCtxScrB` der Antwort zurückschicken → spätere bzw. frühere Verbindungen. `depLocL`/`arrLocL` müssen mit, der Token allein reicht nicht. |
+| `viaLocL`  | `[{"loc": {"extId": "900000001"}}]` erzwingt einen Zwischenhalt. Via == Ziel → `H9380`.                                                                            |
+| `jnyFltrL` | `[{"type": "PROD", "mode": "INC", "value": "<bitmaske>"}]` — Verkehrsmittelfilter. Die Bitmaske ist **String**, nicht Zahl.                                        |
+
+**Verkehrsmittel-Bitmaske** — das `cls`-Feld aus `common.prodL[]`, hier über den
+kompletten Linienkatalog ([`LineSearch`](#linesearch--kompletter-linienkatalog))
+ausgezählt:
+
+| Bit | `catOut`             | Linien im Bestand |
+|-----|----------------------|-------------------|
+| 1   | S-Bahn               | 17                |
+| 2   | Str (Stadtbahn)      | 86                |
+| 8   | Bus, Midi, Mini, SEV | 2601              |
+| 16  | RB, RE, Regio        | 111               |
+| 32  | Fern, IC, ICE, THA   | 5                 |
+| 128 | Fähre                | 1                 |
+| 256 | AST, TAXI            | 304               |
+
+4 und 64 kommen im KVB-Datenbestand nicht vor. Kombinieren per ODER: Stadtbahn
+
++ Bus = `"10"`. Ein Filter, der für die Strecke nichts übrig lässt, endet in
+  `H890` ("keine Verbindung gefunden") — eine Antwort, kein Client-Fehler.
+
+Client: `trip_search(..., num=, via_ext_id=, products=)` und `trip_page(…)`,
+das zusätzlich `ctx_earlier`/`ctx_later` zurückgibt. Bitmasken-Konstanten in
+`kvb_hafas.PRODUCTS`.
+
+**Vollständige `req`-Feldliste**, aus dem Frontend (`grep -oE '"req\.[a-zA-Z.]*"'
+hafas_lib_module_tp.js`): `depLocL`, `arrLocL`, `viaLocL[].loc` (+ `.min`),
+`outDate`, `outTime`, `outFrwd`, `numF`, `maxChg`, `minChgTime`,
+`chgTimeProfile`, `jnyFltrL` (`type`/`mode`/`value`/`meta`), `gisFltrL`,
+`getPasslist`, `getPolyline`, `getTariff`, `getIV`, `getIST`, `getConGroups`,
+`economic`, `liveSearch`, `ushrp`, `ctxScr` (Blättern), `ctxRecon`,
+`outReconL[].ctx`, `storageId`, `psCtx`, `psOutReconL[].ctx`, `psSupplChgTime`,
+`psInput.replacementSearch.{ctx,supplChgTime}`, `frontPreselectionL` /
+`backPreselectionL` (`nodes[].loc`, `gisProfile.type`). Locations akzeptieren
+`extId`, `lid`, `name`, `type`, `crd.x`/`crd.y`, `globalIdL`, `eteId`.
+
 ### Reconstruction — Verbindung wiederherstellen
 
 ```json
@@ -570,6 +657,23 @@ Weitere Felder wie `type: "S"` → `HAMM`.
 - Das Schema für eine Pünktlichkeitsstatistik ist da, aber außer `cnt` füllt die
   KVB nichts.
 
+### LineSearch — kompletter Linienkatalog
+
+```json
+{
+  "meth": "LineSearch",
+  "req": {}
+}
+```
+
+**Response** (`res.lineL[]`): `{lineId, prodX, locX}` für **den gesamten
+Datenbestand** — 3125 Linien, davon 710 mit Präfix `de:vrs:` (Köln/Bonn). Ein
+einziger Request, kein Suchbegriff nötig; `locX` zeigt auf eine Referenz-
+Haltestelle in `common.locL`. Das ist die Liste, die `LineList` & Co. nicht
+liefern (→ `HAMM`).
+
+Client: `all_lines(prefix="de:vrs")`.
+
 ### LineGeoPos — Linien im Umkreis
 
 ```json
@@ -612,22 +716,83 @@ und -zeit.
 ## Methoden-Inventar
 
 Ein unbekannter Methodenname antwortet mit `HAMM` — damit lässt sich trennen, was
-existiert. `NULLPTR`/`PARAMETER`/`LOCATION`/`DATE_TIME`/`DEPARTURE` heißt
-umgekehrt: Methode existiert, Pflichtparameter fehlt.
+existiert. Jeder andere Code (`OK`, `NULLPTR`, `PARAMETER`, `LOCATION`,
+`DATE_TIME`, `DEPARTURE`, `TARIFF`, `PARSE`, `ERROR`, `FAIL`) heißt: Methode
+existiert, Request war nur unvollständig.
 
-**Vorhanden und genutzt:** `LocMatch`, `LocGeoPos`, `LocDetails`, `LocGeoReach`,
-`StationBoard`, `JourneyDetails`, `JourneyMatch`, `JourneyGeoPos`,
-`JourneyCourse`, `TripSearch`, `Reconstruction`, `SearchOnTrip`, `GisRoute`,
-`HimSearch`, `HimGeoPos`, `HimMatch`, `LineMatch`, `LineDetails`, `LineGeoPos`,
-`ServerInfo`.
+**47 Methoden existieren nachweislich.** Alle Zeilen unten sind live geprüft (je ein Request mit leerem `req`). Drei
+Mengen, die sich nicht decken:
 
-**Vorhanden, Request-Schema nicht geknackt:**
+- **Client** — wird von diesem Python-Client aufgerufen (21).
+- **Frontend** — Name steht als Literal in den `hafas_lib_module_*.js` der
+  KVB-WebApp (40). `LineSearch` steht dort, wird im normalen Betrieb aber nie
+  gefeuert; `JourneyCourse`, `SearchOnTrip`, `HimGeoPos`, `HimMatch`,
+  `JourneyTree`, `GisSearch` und `HimDetails` stehen dort gar nicht und wurden
+  nur durch Raten gefunden. Keine der beiden Quellen ist für sich vollständig.
+- **Leerer `req`** — der Fehlercode auf `{"meth": "<X>", "req": {}}`, also der
+  Existenznachweis.
 
-| Methode        | Stand                                                                                                                                                                  |
-|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `JourneyTree`  | Leerer `req` → `OK` mit leerem `jnyTreeNodeL`; jede Parameter-Variante → `HAMM`.                                                                                       |
-| `TariffSearch` | Leerer `req` → `TARIFF`, nimmt aber **kein einziges Feld** an (`ctxRecon`, `conL`, `depLocL`, `ovwTrfRefL` → `HAMM`). Einzige Preis-Methode der API, und unerreichbar. |
-| `Subscr*`      | `SubscrCreate`, `SubscrSearch`, `SubscrDetails`, `SubscrUserCreate` → `ERROR` statt `HAMM`; brauchen vermutlich einen registrierten Nutzer (Push-Abos).                |
+| Methode                                                           | Leerer `req` | Client                                                 | Frontend | Anmerkung                                                                                  |
+|-------------------------------------------------------------------|--------------|--------------------------------------------------------|----------|--------------------------------------------------------------------------------------------|
+| [`LocMatch`](#locmatch--haltestellen-suchen)                      | `NULLPTR`    | find_stops()                                           | ✅       |                                                                                            |
+| [`LocGeoPos`](#locgeopos--haltestellen-in-der-nähe)               | `PARAMETER`  | nearby_stops()                                         | ✅       |                                                                                            |
+| [`LocDetails`](#locdetails--haltestelle-im-detail)                | `OK`         | stop_details(), stop_lines()                           | ✅       |                                                                                            |
+| [`LocGeoReach`](#locgeoreach--isochrone)                          | `LOCATION`   | reachable_stops()                                      | ✅       |                                                                                            |
+| `LocSearch`                                                       | `PARAMETER`  | —                                                      | ✅       | Neben `LocMatch`. Felder nicht durchprobiert.                                              |
+| `LocGraph`                                                        | `PARAMETER`  | —                                                      | ✅       | Graph-Darstellung, Schema offen.                                                           |
+| [`StationBoard`](#stationboard--abfahrtstafel)                    | `DEPARTURE`  | station_board()                                        | ✅       |                                                                                            |
+| [`JourneyDetails`](#journeydetails--einzelfahrt-im-detail)        | `PARAMETER`  | journey_details(), journey_route(), journey_segments() | ✅       |                                                                                            |
+| [`JourneyMatch`](#journeymatch--fahrten-nach-linie)               | `PARAMETER`  | find_journeys()                                        | ✅       |                                                                                            |
+| [`JourneyGeoPos`](#journeygeopos--live-fahrzeugpositionen)        | `FAIL`       | vehicle_positions()                                    | ✅       |                                                                                            |
+| [`JourneyCourse`](#journeycourse--linienverlauf-als-polyline)     | `PARAMETER`  | journey_course()                                       | —        |                                                                                            |
+| `JourneyTree`                                                     | `OK`         | —                                                      | —        | `OK` mit leerem `jnyTreeNodeL`; jede Parameter-Variante → `HAMM`.                          |
+| `JourneyGraph`                                                    | `PARAMETER`  | —                                                      | ✅       | Graph-Darstellung, Schema offen.                                                           |
+| [`TripSearch`](#tripsearch--verbindungssuche)                     | `LOCATION`   | trip_search()                                          | ✅       |                                                                                            |
+| [`Reconstruction`](#reconstruction--verbindung-wiederherstellen)  | `PARAMETER`  | reconstruct()                                          | ✅       |                                                                                            |
+| `ReconstructionContextConverter`                                  | `PARSE`      | —                                                      | ✅       | Kurzlink-/QR-Umwandlung, Storage-Dienst bei der KVB aus — siehe Tabelle unten.             |
+| [`SearchOnTrip`](#searchontrip--alternativen-zu-einer-verbindung) | `PARAMETER`  | trip_alternatives()                                    | —        |                                                                                            |
+| `PartialSearch`                                                   | `PARAMETER`  | —                                                      | ✅       | Abschnitt früher/später suchen; braucht `psCtx`, das die KVB nie ausliefert — siehe unten. |
+| [`GisRoute`](#gisroute--fußweg-straßengenau)                      | `DATE_TIME`  | walk_route()                                           | ✅       |                                                                                            |
+| `GisSearch`                                                       | `PARSE`      | —                                                      | —        | Existiert (`PARSE` statt `HAMM`), nimmt aber kein Feld an.                                 |
+| [`HimSearch`](#himsearch--störungsmeldungen)                      | `OK`         | service_alerts()                                       | ✅       |                                                                                            |
+| [`HimGeoPos`](#himgeopos--störungen-im-kartenausschnitt)          | `OK`         | alerts_in_area()                                       | —        |                                                                                            |
+| [`HimMatch`](#himmatch--aktuell-betroffene-haltestellen)          | `OK`         | affected_stops()                                       | —        |                                                                                            |
+| `HimDetails`                                                      | `OK`         | —                                                      | —        | `OK` mit leeren Listen, nimmt kein Feld an — auch nicht `hid` aus `HimSearch`.             |
+| [`LineMatch`](#linematch--linedetails--linien)                    | `PARAMETER`  | find_lines()                                           | ✅       |                                                                                            |
+| [`LineDetails`](#linematch--linedetails--linien)                  | `PARAMETER`  | line_details()                                         | ✅       |                                                                                            |
+| [`LineGeoPos`](#linegeopos--linien-im-umkreis)                    | `PARAMETER`  | lines_in_area()                                        | ✅       |                                                                                            |
+| [`LineSearch`](#linesearch--kompletter-linienkatalog)             | `OK`         | all_lines()                                            | ✅       |                                                                                            |
+| [`ServerInfo`](#serverinfo--fahrplanperiode)                      | `OK`         | server_info()                                          | ✅       |                                                                                            |
+| `TariffSearch`                                                    | `TARIFF`     | —                                                      | ✅       | Nimmt kein Feld an. Preise kommen ohnehin über `TripSearch.trfRes`.                        |
+| `EventLocGeoPos`                                                  | `PARSE`      | —                                                      | ✅       | Veranstaltungsorte im Umkreis.                                                             |
+| `GeoFeatureGeoPos`                                                | `PARSE`      | —                                                      | ✅       | Kartenobjekte/Layer-Geometrien.                                                            |
+| `GeoFeatureDetails`                                               | `PARSE`      | —                                                      | ✅       | Detail zu einem Kartenobjekt.                                                              |
+| `DataStoreLoad`                                                   | `PARSE`      | —                                                      | ✅       | Generischer Store-Zugriff.                                                                 |
+| `ShareTrip`                                                       | `PARSE`      | —                                                      | ✅       | Schreibend (Verbindung teilen), nicht angefasst.                                           |
+| `ShareLocation`                                                   | `PARSE`      | —                                                      | ✅       | Schreibend (Ort teilen), nicht angefasst.                                                  |
+| `SubscrCreate`                                                    | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrSearch`                                                    | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrDetails`                                                   | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrUpdate`                                                    | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrDelete`                                                    | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrUserCreate`                                                | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrUserDetails`                                               | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrUserUpdate`                                                | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrUserDelete`                                                | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrChannelConfirm`                                            | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+| `SubscrChannelSendDetails`                                        | `ERROR`      | —                                                      | ✅       | Push-Abo, braucht registrierten Nutzer. Schreibend, nicht angefasst.                       |
+
+**Die sechs interessanten Sackgassen im Detail** — Methoden, deren Schema wir kennen oder gezielt geknackt haben, die
+trotzdem nichts liefern:
+
+| Methode                          | Stand                                                                                                                                                                                                                                                                                                                                                                                                                |
+|----------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `JourneyTree`                    | Leerer `req` → `OK` mit leerem `jnyTreeNodeL`; jede Parameter-Variante → `HAMM`.                                                                                                                                                                                                                                                                                                                                     |
+| `TariffSearch`                   | Leerer `req` → `TARIFF`, nimmt aber **kein einziges Feld** an (`ctxRecon`, `conL`, `depLocL`, `ovwTrfRefL` → `HAMM`). Egal — Preise kommen über [`TripSearch`](#tripsearch--verbindungssuche).                                                                                                                                                                                                                       |
+| `PartialSearch`                  | Schema aus dem Frontend bekannt (`psOutReconL[].ctx`, `psCtx`, `psInput.replacementSearch.ctx`, `psSupplChgTime`, `getPasslist`, `getPolyline`), trotzdem tot: `psCtx` erwartet ein `secL[].dep.psCtxDepL` bzw. `arr.psCtxArrE`, und **die KVB liefert diese Felder in keiner `TripSearch`-Antwort** (auch nicht mit `getConGroups`, `ushrp`, `getIV`, `getIST`, `economic`, `liveSearch`). Jeder Versuch → `PARSE`. |
+| `ReconstructionContextConverter` | Schema bekannt: `{"mode": "TO_STORAGE_ID", "ctxL": ["<ctxRecon>"]}` → `res.storageIdL[]`, gedacht für Kurzlinks/QR-Codes. `TO_STORAGE_ID` ist der einzige gültige `mode` (alle anderen → `HAMM`) und antwortet immer `PARSE`. `Reconstruction` nimmt das Gegenstück `storageId` an — der Storage-Dienst ist bei der KVB nicht konfiguriert (kein `qrCodeBasePath` in der `webapp.config.json`).                      |
+| `HimDetails`                     | Leerer `req` → `OK` mit leeren Listen, nimmt kein einziges Feld an (auch nicht `hid` aus `HimSearch`). Gleiche Sackgasse wie `JourneyTree`.                                                                                                                                                                                                                                                                          |
+| `GisSearch`                      | Leerer `req` → `PARSE` (existiert also), aber kein Feld akzeptiert, `req` als Liste/String ebenfalls `HAMM`.                                                                                                                                                                                                                                                                                                         |
 
 **Nicht vorhanden** (alle `HAMM`): `StopList`, `StationList`, `LocList`,
 `LineList`, `ArchiveSearch`, `HistorySearch`, `JourneyArchive`, `IstDaten`,
@@ -637,10 +802,41 @@ umgekehrt: Methode existiert, Pflichtparameter fehlt.
 `Geometry`, `FareSearch`, `Ticket`, `PriceSearch`, `BestPrice`, `LocData`,
 `GisLocation`, `MatchSvc`, `Departure`, `Arrival`, `Kaleidoscope`,
 `SubscrChannelList`, `AttrSearch`, `OperatorSearch`, `ProductSearch`,
-`CalendarSearch`, `CheckIn`.
+`CalendarSearch`, `CheckIn`, `AddOnSearch`, `BookingDetails`, `ConGrpSettings`,
+`GisInfo`, `GisMatch`, `GisGeoPos`, `GisLocDetails`, `Rebook`,
+`MatchServiceDays`, `JourneyFilter`, `JourneyFilterMatch`, `OTPDetails`,
+`TripInfo`, `TripPrice`, `LocValidate`, `PoiGeoPos`, `NetSummary`, `GraphInfo`,
+`TimetableChange`, `ConDetails`, `ConScoreSearch`, `HimMatchGeo`, `ProdMatch`,
+`OperatorMatch`, `AttrMatch`, `RemarkSearch`, `IconSearch`, `ThemeMatch`,
+`UserSettings`, `ClientSettings`, `FeedbackCreate`, `MapData`, `Layers`,
+`LineFilter`, `MatchLoc`, `StationBoardSearch`, `TrainSearch`.
 
-Alles Tarif-/Preisbezogene fehlt damit komplett: Verbindungen enthalten zwar
-`ovwTrfRefL`-Referenzen, aber keine Methode macht daraus Preise.
+**Rezept zum Methoden-Finden — nicht raten, das Frontend lesen.** Die HAFAS-WebApp
+lädt ihre Features als einzelne Module nach; `hafas_lib_core.js` listet sie in
+`addModule("<name>")`, jedes liegt unter
+`https://auskunft.kvb.koeln/js/hafas_lib_module_<name>.js` (36 Stück, u.a.
+`livemap`, `mobilityradar`, `tariffwizard`, `elevationlevel`). Die
+Methodennamen stehen dort als Literale:
+
+```bash
+curl -s https://auskunft.kvb.koeln/js/hafas_lib_module_tp.js > tp.js
+grep -ohE 'hafasHCIRequestObject"\s*,\s*"[A-Za-z]+"|request:"[A-Za-z]+"' *.js | sort -u
+```
+
+Dasselbe gilt für Request-Felder: die Module bauen ihre Requests über
+`r.add("req.<feld>", …)`, ein `grep -oE '"req\.[a-zA-Z.]*"'` liefert die
+vollständige Feldliste einer Methode, inklusive der nie benutzten. So fielen
+`LineSearch`, `PartialSearch`, `ReconstructionContextConverter`, `LocSearch`,
+`JourneyGraph`, `LocGraph`, `EventLocGeoPos`, `GeoFeature*` und `DataStoreLoad`
+auf einen Schlag.
+
+**Gegenprobe:** 231 systematisch erzeugte Namen (Präfixe `Loc|Journey|Line|Him|
+Geo|GeoFeature|Event|Trip|Con|Gis|Tariff|Stc|Poly|Op|Prod|Rem|Map` × Suffixe
+`Match|Details|GeoPos|Search|Graph|Course|Tree|Reach|Data|GeoReach|List|Info|
+Load|Store|Pos`) ergaben genau **einen** Treffer (`LineSearch`, den das
+Frontend ohnehin nannte). Der Namensraum ist damit weitgehend ausgeschöpft:
+**47 Methoden existieren nachweislich** (siehe Tabelle oben), 21 davon nutzt
+dieser Client.
 
 **Rezept zum Schema-Knacken:** `HAMM` sagt nicht, *welches* Feld schuld ist —
 also pro Request **genau ein Feld** schicken. `HAMM` = Feldname existiert nicht,
@@ -673,9 +869,9 @@ nach internen SAE/ITCS-Daten fragen.
 ## Auslastungsdaten
 
 **Nicht gefunden.** Weder `StationBoard` noch `JourneyDetails` liefern ein
-Auslastungs-/Kapazitätsfeld (in anderen HAFAS-Installationen z.B. `occ`). Nicht
-abschließend verifiziert — falls es einen Weg gibt, dann über eine noch nicht
-durchprobierte `req`-Option bei `StationBoard`.
+Auslastungs-/Kapazitätsfeld (in anderen HAFAS-Installationen z.B. `occ`). Die
+`TripSearch`-Antwort bringt die passenden `common`-Blöcke (`tcocL`, `stcGrpL`,
+`stcLiL`, `tctcL`) zwar mit, die KVB füllt sie aber alle leer.
 
 ## Bekannte Fehlercodes
 

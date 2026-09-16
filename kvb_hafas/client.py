@@ -32,6 +32,7 @@ from kvb_hafas.models import (
     ServerInfo,
     ServiceAlert,
     Stop,
+    TripPage,
     Vehicle,
     WalkRoute,
 )
@@ -52,6 +53,21 @@ ENDPOINT = "https://auskunft.kvb.koeln/gate"
 # it; that is a false positive. KVB can rotate or block it at any time.
 AID = "Rt6foY5zcTTRXMQs"
 USER_AGENT = "Mozilla/5.0 (compatible; kvb-hafas-client/0.1)"
+
+# Verkehrsmittel-Bitmaske für den `jnyFltrL`-Filter von TripSearch. Die Werte
+# sind das `cls`-Feld aus `common.prodL[]` — hier aus dem kompletten
+# Linienkatalog (LineSearch) abgezählt, nicht geraten. 4 und 64 kommen im
+# KVB-Datenbestand nicht vor.
+PRODUCTS = {
+    "s_bahn": 1,
+    "stadtbahn": 2,  # catOut "Str"
+    "bus": 8,  # inkl. Midi, Mini, SEV
+    "regionalzug": 16,  # RB, RE, Regio
+    "fernzug": 32,  # IC, ICE, THA
+    "faehre": 128,
+    "taxi": 256,  # AST und TAXI
+}
+ALL_PRODUCTS = sum(PRODUCTS.values())
 
 
 class KVBHafasClient:
@@ -112,6 +128,45 @@ class KVBHafasClient:
         if svc_res.get("err") != "OK":
             raise KVBHafasError(f"{meth} failed: {svc_res.get('err')}")
         return svc_res["res"]
+
+    def _call_many(self, calls: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any] | None]:
+        """Mehrere Methoden in einem POST (`svcReqL` mit n Einträgen).
+
+        Das spart Roundtrips und — wichtiger — die `min_interval`-Pause, die
+        sonst pro Fahrt anfällt. Gibt pro Eintrag das `res` zurück, oder `None`
+        wenn dieser Teil-Request nicht `OK` war; die Reihenfolge entspricht
+        `calls`. Envelope-Fehler (der ganze POST kaputt) fliegen weiterhin.
+        """
+        if self.min_interval:
+            wait = self._last_call + self.min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
+        payload = {
+            "id": self._next_id(),
+            "ver": "1.16",
+            "lang": "deu",
+            "auth": {"type": "AID", "aid": AID},
+            "client": {"id": "HAFAS", "type": "WEB"},
+            "svcReqL": [{"meth": meth, "req": req} for meth, req in calls],
+        }
+        resp = self.session.post(
+            ENDPOINT,
+            json=payload,
+            headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("err") and data["err"] != "OK":
+            raise KVBHafasError(f"batch failed at envelope level: {data['err']} ({data.get('errTxt', '')})")
+        results = data.get("svcResL", [])
+        if len(results) != len(calls):
+            # Ohne diese Prüfung würde zip() in journey_routes() stillschweigend
+            # Antworten den falschen jids zuordnen — und falsche Laufwege landen
+            # in der DB. Lieber der ganze Block kaputt als still verfälscht.
+            raise KVBHafasError(f"batch returned {len(results)} results for {len(calls)} requests")
+        return [r.get("res") if r.get("err") == "OK" else None for r in results]
 
     def find_stops(self, query: str, max_results: int = 5) -> list[Stop]:
         """Search for stops by (partial) name. Returns best matches first."""
@@ -215,7 +270,27 @@ class KVBHafasClient:
         beider Richtungen steht die Master-ID in `JourneyStop.station_ext_id`
         (siehe station_ext_id()).
         """
-        res = self._call("JourneyDetails", {"jid": jid})
+        return self._parse_journey_route(self._call("JourneyDetails", {"jid": jid}), jid)
+
+    def journey_routes(self, jids: list[str], chunk: int = 10) -> list[JourneyRoute]:
+        """Laufwege vieler Fahrten, gebündelt (mehrere `svcReqL`-Einträge pro POST).
+
+        Das Gate beantwortet mehrere Methoden in einem Request; für N Fahrten
+        fallen so N/chunk statt N Roundtrips (und Rate-Limit-Pausen) an. Fahrten,
+        deren Teil-Antwort nicht `OK` ist, fehlen im Ergebnis — der Rest kommt
+        trotzdem an, sonst würde eine kaputte `jid` den ganzen Block kosten.
+        """
+        routes = []
+        for start in range(0, len(jids), chunk):
+            batch = jids[start : start + chunk]
+            for jid, res in zip(batch, self._call_many([("JourneyDetails", {"jid": j}) for j in batch])):
+                if res is not None:
+                    routes.append(self._parse_journey_route(res, jid))
+        return routes
+
+    @staticmethod
+    def _parse_journey_route(res: dict[str, Any], jid: str) -> JourneyRoute:
+        """`JourneyDetails`-Antwort in eine JourneyRoute übersetzen."""
         jny = res.get("journey", {})
         loc_l = res.get("common", {}).get("locL", [])
         prod_l = res.get("common", {}).get("prodL", [])
@@ -438,13 +513,53 @@ class KVBHafasClient:
         return False
 
     def trip_search(
-        self, from_ext_id: str, to_ext_id: str, date: str | None = None, time: str | None = None
+        self,
+        from_ext_id: str,
+        to_ext_id: str,
+        date: str | None = None,
+        time: str | None = None,
+        *,
+        num: int | None = None,
+        via_ext_id: str | None = None,
+        products: int | None = None,
     ) -> list[Connection]:
         """Search for connections between two stops (by extId, see find_stops).
 
         `date`/`time` optional (YYYYMMDD / HHMMSS) — defaults to "now" if
         omitted. Subject to the same timetable-period limits as
         station_board(), see docs/API.md#historische-daten.
+
+        `num` = gewünschte Anzahl Verbindungen (der Server liefert auch mal
+        eine mehr), `via_ext_id` erzwingt einen Zwischenhalt, `products` ist
+        eine Bitmaske aus PRODUCTS (z.B. `PRODUCTS["stadtbahn"] |
+        PRODUCTS["bus"]`). Zum Blättern siehe trip_page().
+        """
+        return self.trip_page(
+            from_ext_id, to_ext_id, date, time, num=num, via_ext_id=via_ext_id, products=products
+        ).connections
+
+    def trip_page(
+        self,
+        from_ext_id: str,
+        to_ext_id: str,
+        date: str | None = None,
+        time: str | None = None,
+        *,
+        num: int | None = None,
+        via_ext_id: str | None = None,
+        products: int | None = None,
+        scroll_ctx: str | None = None,
+    ) -> TripPage:
+        """Wie trip_search(), aber mit den Blätter-Tokens der Antwort.
+
+        `scroll_ctx` nimmt `ctx_earlier`/`ctx_later` einer vorherigen Seite und
+        liefert die Verbindungen davor bzw. danach — das ist das "früher/später"
+        der offiziellen Auskunft. Die Locations müssen dabei mitgeschickt
+        werden, der Token allein reicht nicht.
+
+        Ein Filter, der für die Strecke nichts übrig lässt, endet in `H890`
+        ("keine Verbindung gefunden") — das ist eine Antwort, kein Fehler
+        unsererseits.
         """
         req: dict[str, Any] = {
             "depLocL": [{"extId": from_ext_id}],
@@ -454,8 +569,21 @@ class KVBHafasClient:
             req["outDate"] = date
         if time:
             req["outTime"] = time
+        if num is not None:
+            req["numF"] = num
+        if via_ext_id:
+            req["viaLocL"] = [{"loc": {"extId": via_ext_id}}]
+        if products is not None:
+            req["jnyFltrL"] = [{"type": "PROD", "mode": "INC", "value": str(products)}]
+        if scroll_ctx:
+            req["ctxScr"] = scroll_ctx
 
-        return self._parse_connections(self._call("TripSearch", req))
+        res = self._call("TripSearch", req)
+        return TripPage(
+            connections=self._parse_connections(res),
+            ctx_earlier=res.get("outCtxScrB", ""),
+            ctx_later=res.get("outCtxScrF", ""),
+        )
 
     def _parse_connections(self, res: dict[str, Any]) -> list[Connection]:
         """`outConL` einer TripSearch-/Reconstruction-Antwort in Connections übersetzen."""
@@ -492,6 +620,12 @@ class KVBHafasClient:
             # winzige zwischen den Steigen derselben Haltestelle), die sonst
             # als Umstieg durchgehen würden.
             rides = sum(1 for leg in legs if not leg.walk)
+            # trfRes liefert den Rheinlandtarif-Preis gratis mit jeder TripSearch;
+            # ovwTrfRefL zeigt auf den für die Verbindung gültigen Eintrag.
+            ref = (con.get("ovwTrfRefL") or [{}])[0]
+            fare_sets = con.get("trfRes", {}).get("fareSetL", [])
+            fares = (fare_sets[ref.get("fareSetX", 0)] if ref.get("fareSetX", 0) < len(fare_sets) else {}).get("fareL", [])
+            fare = fares[ref.get("fareX", 0)] if ref.get("fareX", 0) < len(fares) else {}
             connections.append(
                 Connection(
                     dep_time=con.get("dep", {}).get("dTimeS", ""),
@@ -499,6 +633,9 @@ class KVBHafasClient:
                     num_changes=max(rides - 1, 0),
                     legs=legs,
                     ctx_recon=con.get("ctxRecon", ""),
+                    fare_cents=fare.get("prc"),
+                    fare_currency=fare.get("cur", ""),
+                    fare_name=fare.get("name", ""),
                 )
             )
         return connections
@@ -724,6 +861,21 @@ class KVBHafasClient:
         res = self._call("LineMatch", {"input": query})
         prod_l = res.get("common", {}).get("prodL", [])
         return [_line_from_prod(prod_l[ln["prodX"]], ln.get("lineId", "")) for ln in res.get("lineL", []) if ln.get("prodX", -1) < len(prod_l)]
+
+    def all_lines(self, prefix: str = "") -> list[Line]:
+        """Kompletter Linienkatalog in einem Request (LineSearch, leerer req).
+
+        ~3100 Linien des ganzen Datenbestands, nicht nur KVB. `prefix` filtert
+        clientseitig auf die `line_id` — "de:vrs" lässt die ~710 Linien aus
+        Köln/Bonn übrig. Im Gegensatz zu find_lines() ohne Suchbegriff.
+        """
+        res = self._call("LineSearch", {})
+        prod_l = res.get("common", {}).get("prodL", [])
+        return [
+            _line_from_prod(prod_l[ln["prodX"]], ln.get("lineId", ""))
+            for ln in res.get("lineL", [])
+            if ln.get("prodX", -1) < len(prod_l) and ln.get("lineId", "").startswith(prefix)
+        ]
 
     def line_details(self, line_id: str) -> Line:
         """Details zu einer Linie (LineDetails), inkl. Pünktlichkeits-Statistik.

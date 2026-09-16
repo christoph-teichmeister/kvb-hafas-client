@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kvb_hafas import KVBHafasClient, KVBHafasError, Stop
+from kvb_hafas import PRODUCTS, KVBHafasClient, KVBHafasError, Stop
 
 LOCMATCH_RESPONSE = {
     "svcResL": [
@@ -148,10 +148,25 @@ TRIPSEARCH_RESPONSE = {
                     ],
                     "prodL": [{"name": "1"}, {"name": "Fußweg"}, {"name": "18"}],
                 },
+                "outCtxScrB": "ctx-back",
+                "outCtxScrF": "ctx-forward",
                 "outConL": [
                     {
                         "dep": {"dTimeS": "120400"},
                         "arr": {"aTimeS": "120700"},
+                        "ovwTrfRefL": [{"fareSetX": 0, "fareX": 1, "type": "F"}],
+                        "trfRes": {
+                            "fareSetL": [
+                                {
+                                    "desc": "Rheinlandtarif",
+                                    "fareL": [
+                                        {"cur": "EUR", "name": "Preisstufe K", "prc": 290},
+                                        {"cur": "EUR", "name": "Preisstufe 1b", "prc": 400},
+                                    ],
+                                }
+                            ],
+                            "statusCode": "OK",
+                        },
                         "secL": [
                             {
                                 "type": "JNY",
@@ -332,6 +347,112 @@ def test_trip_search_parses_connections():
     last = connections[1].legs[-1]
     assert last.dep_time == "121900"  # Realtime schlägt Soll
     assert (last.line, last.arr_platform) == ("18", "2")
+
+
+def test_trip_page_sends_options_and_returns_scroll_ctx():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(TRIPSEARCH_RESPONSE)) as post:
+        page = client.trip_page(
+            "900000002",
+            "900000001",
+            num=6,
+            via_ext_id="900000005",
+            products=PRODUCTS["stadtbahn"] | PRODUCTS["bus"],
+            scroll_ctx="scroll-token",
+        )
+
+    req = post.call_args.kwargs["json"]["svcReqL"][0]["req"]
+    assert req["numF"] == 6
+    assert req["viaLocL"] == [{"loc": {"extId": "900000005"}}]
+    # 2 | 8 = 10, als String — die API nimmt die Bitmaske nicht als Zahl.
+    assert req["jnyFltrL"] == [{"type": "PROD", "mode": "INC", "value": "10"}]
+    assert req["ctxScr"] == "scroll-token"
+    assert page.ctx_later == "ctx-forward"
+    assert page.ctx_earlier == "ctx-back"
+    assert len(page.connections) == 2
+
+
+def test_trip_search_omits_unset_options():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(TRIPSEARCH_RESPONSE)) as post:
+        client.trip_search("900000002", "900000001")
+
+    req = post.call_args.kwargs["json"]["svcReqL"][0]["req"]
+    assert set(req) == {"depLocL", "arrLocL"}
+
+
+def test_trip_search_parses_fare():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(TRIPSEARCH_RESPONSE)):
+        connections = client.trip_search("900000002", "900000001")
+
+    # ovwTrfRefL zeigt auf fareX=1, nicht auf den ersten Eintrag.
+    assert (connections[0].fare_cents, connections[0].fare_currency) == (400, "EUR")
+    assert connections[0].fare_name == "Preisstufe 1b"
+    # Verbindung ohne trfRes bleibt preislos statt zu krachen.
+    assert connections[1].fare_cents is None
+
+
+def _journey_res(line, direction):
+    return {
+        "common": {"locL": [{"name": "Köln Neumarkt", "extId": "300000202"}], "prodL": [{"name": line}]},
+        "journey": {"dirTxt": direction, "prodX": 0, "stopL": [{"locX": 0, "dTimeS": "210000", "idx": 0}]},
+    }
+
+
+JOURNEY_ROUTES_BATCH_RESPONSE = {
+    "svcResL": [
+        {"meth": "JourneyDetails", "err": "OK", "res": _journey_res("18", "Thielenbruch")},
+        {"meth": "JourneyDetails", "err": "FAIL"},
+        {"meth": "JourneyDetails", "err": "OK", "res": _journey_res("1", "Bensberg")},
+    ]
+}
+
+
+def test_journey_routes_batches_into_one_post():
+    client = KVBHafasClient()
+    with patch.object(
+        client.session, "post", return_value=_mock_response(JOURNEY_ROUTES_BATCH_RESPONSE)
+    ) as post:
+        routes = client.journey_routes(["jid-a", "jid-b", "jid-c"])
+
+    # Drei Fahrten, ein einziger POST mit drei svcReqL-Einträgen.
+    assert post.call_count == 1
+    sent = post.call_args.kwargs["json"]["svcReqL"]
+    assert [r["req"]["jid"] for r in sent] == ["jid-a", "jid-b", "jid-c"]
+    # Die kaputte Teil-Antwort fällt raus, der Rest kommt trotzdem an.
+    assert [r.line for r in routes] == ["18", "1"]
+    assert routes[0].jid == "jid-a"
+    # ... und die zweite Route wird nicht auf die falsche jid gemappt.
+    assert routes[1].jid == "jid-c"
+
+
+def test_journey_routes_splits_into_chunks():
+    client = KVBHafasClient()
+
+    def echo(*_args, **kwargs):
+        # So viele Teil-Antworten wie Teil-Anfragen — sonst greift die
+        # Längenprüfung in _call_many().
+        n = len(kwargs["json"]["svcReqL"])
+        return _mock_response(
+            {"svcResL": [{"meth": "JourneyDetails", "err": "OK", "res": _journey_res("18", "X")}] * n}
+        )
+
+    with patch.object(client.session, "post", side_effect=echo) as post:
+        routes = client.journey_routes(["a", "b", "c", "d", "e"], chunk=2)
+
+    assert post.call_count == 3  # 2 + 2 + 1
+    assert len(routes) == 5
+
+
+def test_journey_routes_rejects_truncated_batch():
+    client = KVBHafasClient()
+    truncated = {"svcResL": JOURNEY_ROUTES_BATCH_RESPONSE["svcResL"][:2]}
+    with patch.object(client.session, "post", return_value=_mock_response(truncated)):
+        # Zwei Antworten auf drei Anfragen: lieber Fehler als Laufwege unter
+        # der falschen jid in der DB.
+        with pytest.raises(KVBHafasError):
+            client.journey_routes(["jid-a", "jid-b", "jid-c"])
 
 
 def test_call_raises_on_envelope_level_error():
@@ -793,6 +914,34 @@ def test_affected_stops_dedupes_and_drops_null_coords():
     # crd 0/0 ist "keine Koordinate", nicht Position null/null im Atlantik.
     assert stops[0].lat is None
     assert stops[1].lat == pytest.approx(50.97)
+
+
+LINESEARCH_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "LineSearch",
+            "err": "OK",
+            "res": {
+                "common": {"prodL": [{"name": "S1"}, {"name": "18", "prodCtx": {"catOut": "Str"}}]},
+                "lineL": [
+                    {"lineId": "de:nrw:s1:", "prodX": 0},
+                    {"lineId": "de:vrs:18", "prodX": 1},
+                ],
+            },
+        }
+    ]
+}
+
+
+def test_all_lines_filters_by_prefix():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(LINESEARCH_RESPONSE)) as post:
+        assert [line.name for line in client.all_lines()] == ["S1", "18"]
+        # Katalog geht über die KVB hinaus — Prefix schneidet auf Köln/Bonn zu.
+        vrs = client.all_lines("de:vrs")
+
+    assert [(line.name, line.category) for line in vrs] == [("18", "Str")]
+    assert post.call_args.kwargs["json"]["svcReqL"][0]["req"] == {}
 
 
 def test_lines_in_area_dedupes_by_line_id():

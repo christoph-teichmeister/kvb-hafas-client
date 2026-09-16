@@ -68,6 +68,18 @@ class Connection:
     num_changes: int  # Anzahl Fahrt-Abschnitte - 1 (Fußwege zählen nicht)
     legs: list[Leg] = field(default_factory=list)
     ctx_recon: str = ""  # Token für reconstruct(), siehe docs/API.md#reconstruction
+    fare_cents: int | None = None  # trfRes, z.B. 290 = 2,90 EUR
+    fare_currency: str = ""
+    fare_name: str = ""  # Preisstufe, z.B. "Preisstufe 1b"
+
+
+@dataclass
+class TripPage:
+    """Eine Seite Verbindungen plus die Tokens zum Blättern (TripSearch)."""
+
+    connections: list[Connection] = field(default_factory=list)
+    ctx_earlier: str = ""  # outCtxScrB — an trip_page(scroll_ctx=…) für frühere
+    ctx_later: str = ""  # outCtxScrF — … bzw. spätere Verbindungen
 
 
 @dataclass
