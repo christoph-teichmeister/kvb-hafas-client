@@ -12,12 +12,16 @@ verwenden.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import requests
 
 ENDPOINT = "https://auskunft.kvb.koeln/gate"
+# Public HAFAS access ID, served in cleartext by the KVB widget generator at
+# https://auskunft.kvb.koeln/widgetgenerator.html. Shared by every widget user,
+# not a per-user secret - no checksum or salt required. Secret scanners may flag
+# it; that is a false positive. KVB can rotate or block it at any time.
 AID = "Rt6foY5zcTTRXMQs"
 USER_AGENT = "Mozilla/5.0 (compatible; kvb-hafas-client/0.1)"
 
@@ -32,6 +36,7 @@ class Stop:
     ext_id: str
     lat: float | None = None
     lon: float | None = None
+    lines: tuple[str, ...] = ()  # only filled by nearby_stops(with_lines=True)
 
 
 @dataclass
@@ -167,14 +172,24 @@ class KVBHafasClient:
             )
         return stops
 
-    def nearby_stops(self, lat: float, lon: float, max_dist_m: int = 500, max_results: int = 10) -> list[Stop]:
-        """Find stops/POIs within max_dist_m meters of the given coordinates.
+    def nearby_stops(
+        self,
+        lat: float,
+        lon: float,
+        max_dist_m: int = 500,
+        max_results: int = 10,
+        with_lines: bool = False,
+    ) -> list[Stop]:
+        """Find stops within max_dist_m meters of the given coordinates.
 
-        Note: without a location-type filter this also returns POIs (museums,
-        landmarks, etc.), not just public transport stops. HAFAS supports a
-        `locFltrL` product-type bitmask to restrict this to stops only; the
-        exact bitmask for KVB hasn't been reverse-engineered yet (see
-        docs/API.md).
+        POIs (museums, landmarks, ...) are excluded via `getPOIs: False` —
+        they carry an extId that StationBoard answers with a region-wide
+        board, which is useless here.
+
+        `with_lines`: also fill Stop.lines with the line labels currently
+        serving each stop. LocGeoPos itself carries no per-stop product
+        info, so this costs one extra StationBoard request per stop and
+        only sees lines with an upcoming departure.
         """
         res = self._call(
             "LocGeoPos",
@@ -184,6 +199,7 @@ class KVBHafasClient:
                     "maxDist": max_dist_m,
                 },
                 "maxLoc": max_results,
+                "getPOIs": False,
             },
         )
         stops = []
@@ -197,7 +213,14 @@ class KVBHafasClient:
                     lon=crd["x"] / 1_000_000 if crd else None,
                 )
             )
+        if with_lines:
+            stops = [replace(stop, lines=self.stop_lines(stop.ext_id)) for stop in stops]
         return stops
+
+    def stop_lines(self, stop_ext_id: str, max_journeys: int = 30) -> tuple[str, ...]:
+        """Line labels with an upcoming departure at this stop, sorted."""
+        lines = {dep.line for dep in self.station_board(stop_ext_id, max_journeys)}
+        return tuple(sorted(lines - {"?"}, key=lambda name: (len(name), name)))
 
     def journey_details(self, jid: str) -> dict[str, Any]:
         """Fetch full stop-by-stop details for a single journey.

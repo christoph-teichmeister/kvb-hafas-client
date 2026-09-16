@@ -351,3 +351,12 @@ def test_call_raises_on_envelope_level_error():
     with patch.object(client.session, "post", return_value=_mock_response(ENVELOPE_ERROR_RESPONSE)):
         with pytest.raises(KVBHafasError):
             client.service_alerts()
+
+
+def test_stop_lines_dedupes_and_sorts():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)):
+        lines = client.stop_lines("900000002")
+
+    assert lines == tuple(sorted(set(lines), key=lambda name: (len(name), name)))
+    assert "?" not in lines

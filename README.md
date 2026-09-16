@@ -74,6 +74,10 @@ Oder interaktiv über die CLI (Menü mit Abfahrten, Verbindungssuche, Umkreissuc
 uv run main.py
 ```
 
+Die Library selbst hängt nur an `requests`. Die CLI nutzt zusätzlich `questionary`
+(Pfeiltasten-Menüs) und `rich` (Tabellen, Farben) — beide liegen in der
+`dev`-Dependency-Group und sind nicht Teil des Pakets.
+
 ## Was funktioniert
 
 | Feature                                                    | Status                                                                                                                                                                                                                         |
