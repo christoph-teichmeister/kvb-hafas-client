@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Soll-Fahrplan einer Linie für einen Betriebstag in eine SQLite-DB ziehen.
 
-    uv run fetch_timetable.py --line 5 --date 2026-09-17
+    uv run -m timetable.fetch --line 5 --date 2026-09-17
 
 Zweistufig:
   1. Discovery — Abfahrts- und Ankunftstafel an einer *ruhigen* Endhaltestelle.

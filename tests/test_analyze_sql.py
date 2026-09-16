@@ -1,4 +1,4 @@
-"""Regressionstest für die Zeitarithmetik in analyze.sql.
+"""Regressionstest für die Zeitarithmetik in timetable/analyze.sql.
 
 Der Anlass: die Abstände wurden ursprünglich über julianday() gerechnet. Das
 liefert Fließkomma — eine Minute ergibt 0.99999994 — und CAST(... AS INTEGER)
@@ -11,12 +11,12 @@ import pathlib
 
 from kvb_hafas import JourneyRoute, JourneyStop, Stop, storage
 
-ANALYZE_SQL = pathlib.Path(__file__).resolve().parent.parent / "analyze.sql"
+ANALYZE_SQL = pathlib.Path(__file__).resolve().parent.parent / "timetable" / "analyze.sql"
 
 
 def _headway_view(conn):
-    """Die headway-View aus analyze.sql anlegen, so wie analyze.py es tut."""
-    script = "\n".join(l for l in ANALYZE_SQL.read_text().splitlines() if not l.startswith("."))
+    """Die headway-View aus analyze.sql anlegen, so wie timetable/analyze.py es tut."""
+    script = "\n".join(line for line in ANALYZE_SQL.read_text().splitlines() if not line.startswith("."))
     head = script.split("SELECT '— Takt je Stunde")[0]
     conn.executescript(head)
 

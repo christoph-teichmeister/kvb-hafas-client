@@ -9,9 +9,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import date as _date
 from datetime import datetime, timedelta
-from typing import Iterable
 
-from .client import JourneyRoute
+from kvb_hafas.models import JourneyRoute
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS stop (

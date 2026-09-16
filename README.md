@@ -81,34 +81,57 @@ Die Library selbst hängt nur an `requests`. Die CLI nutzt zusätzlich `question
 (Pfeiltasten-Menüs) und `rich` (Tabellen, Farben) — beide liegen in der
 `dev`-Dependency-Group und sind nicht Teil des Pakets.
 
+## Projektstruktur
+
+```
+kvb_hafas/      Library (nur requests)
+  models.py       Dataclasses: Stop, Departure, Connection, JourneyRoute, …
+  parsing.py      HAFAS-Rohdaten-Helfer (Polyline, Mast-/Haltestellen-IDs)
+  client.py       KVBHafasClient — alle Requests gegen den mgate-Endpunkt
+  storage.py      SQLite-Schema und Persistenz für Laufwege
+cli/            Interaktive Terminal-Oberfläche (questionary + rich)
+  ui.py           Prompts, Auswahlmenüs, Panels
+  format.py       HAFAS-Zeiten/Dauern -> lesbare Strings
+  departures.py / trips.py / alerts.py / geo.py / network.py   je ein Menüpunkt
+timetable/      Fahrplan-Erhebung: fetch.py (einsammeln), analyze.py + analyze.sql (auswerten)
+main.py         Entry-Point der CLI
+```
+
+Fahrplan eines Betriebstags einsammeln und auswerten:
+
+```bash
+uv run -m timetable.fetch --line 5 --date 2026-09-17 --db timetable.db
+uv run -m timetable.analyze --db timetable.db
+```
+
 ## Was funktioniert
 
-| Feature                                                    | Status                                                                                                                                                                                                                         |
-|------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Haltestellensuche (`find_stops`)                           | ✅                                                                                                                                                                                                                             |
-| Umkreissuche (`nearby_stops`)                              | ✅ liefert aber auch POIs, kein reiner Stop-Filter                                                                                                                                                                             |
-| Echtzeit-Abfahrten (`station_board`)                       | ✅ inkl. Soll/Ist-Zeiten                                                                                                                                                                                                       |
-| Fahrtausfälle (`isCncl`-Flag)                              | ✅ vorhanden, noch nicht gegen echten Ausfall verifiziert                                                                                                                                                                      |
-| Zwischenhalte einer Fahrt (`journey_details`)              | ✅                                                                                                                                                                                                                             |
-| Verbindungssuche (`trip_search`)                           | ✅                                                                                                                                                                                                                             |
-| Störungsmeldungen (`service_alerts`)                       | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — `line="133"` filtert serverseitig, `stop=…` client-seitig (Loc-Referenz + Namensabgleich im Text). Die eingestreute KVB-Werbung (`category == 99`) musst du selbst rausfiltern |
-| Haltestellen-Detail + alle Linien (`stop_details`, `stop_lines`) | ✅ aus dem Fahrplan (`LocDetails.pRefL`), nicht nur die nächsten Abfahrten                                                                                                                                              |
-| Isochrone „was ist in X Minuten erreichbar“ (`reachable_stops`) | ✅ Steige werden auf die Haltestelle zusammengefasst                                                                                                                                                                    |
-| Live-Fahrzeugpositionen (`vehicle_positions`)              | ✅ Bounding-Box, Positionen sind aus Fahrplan + Prognose hochgerechnet, kein GPS                                                                                                                                               |
-| Liniensuche & -details (`find_lines`, `line_details`)      | ✅ inkl. Betreiber und Fahrtenzahl; das Schema für Pünktlichkeitsstatistik ist da, aber von der KVB nicht befüllt                                                                                                              |
-| Fahrten einer Linie inkl. Verkehrstage (`find_journeys`)   | ✅ `sDaysI` im Klartext („Mo - Fr; nicht 10. bis 28. Aug“)                                                                                                                                                                     |
-| Linienverlauf als Polyline (`journey_course`)              | ✅ ein Punkt pro Halt, Google-Encoded-Polyline                                                                                                                                                                                 |
-| Verbindung wiederherstellen (`reconstruct`)                | ✅ über `Connection.ctx_recon`, holt frische Echtzeitdaten ohne neue Suche                                                                                                                                                     |
-| Fahrplanperiode / Serverzeit (`server_info`)               | ✅                                                                                                                                                                                                                             |
-| Aktuell betroffene Haltestellen (`affected_stops`)         | ✅ kurze Liste „wo klemmt es gerade", parameterlos                                                                                                                                                                              |
-| Linien im Umkreis (`lines_in_area`)                        | ✅ vollständiger als `stop_details().lines` — enthält auch die Nachtlinien; Server deckelt bei 50                                                                                                                              |
-| Störungen im Kartenausschnitt (`alerts_in_area`)           | ⚠️ funktioniert, war für Köln aber immer leer — nur Meldungen mit Geo-Bezug                                                                                                                                                    |
-| Fußweg straßengenau (`walk_route`)                         | ✅ Polyline zu einem Fußweg-Abschnitt aus `trip_search` (`Leg.gis_ctx`); freies A-nach-B-Routing geht nicht, der Server akzeptiert nur selbst ausgegebene Tokens                                                                |
-| Alternativen zu einer Verbindung (`trip_alternatives`)     | ✅ über `Connection.ctx_recon`, liefert spätere Verbindungen auf derselben Relation                                                                                                                                            |
-| Push-Abos (`Subscr*`)                                      | ⚠️ Methoden existieren, brauchen aber ein Nutzerkonto — und sind die einzigen schreibenden, daher bewusst nicht angefasst                                                                                                      |
-| Historische Daten jeder Art                                | ❌ kein Archiv, keine abgelaufenen Störungsmeldungen, keine Archiv-Methode — mit Messwerten belegt in [docs/API.md](docs/API.md#historische-daten)                                                                                                                |
-| Auslastungsdaten                                           | ❌ nicht gefunden, vermutlich von KVB nicht befüllt                                                                                                                                                                            |
-| Tarife/Preise                                              | ❌ keine einzige Preis-Methode vorhanden (alles `HAMM`)                                                                                                                                                                        |
+| Feature                                                          | Status                                                                                                                                                                                                                         |
+|------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Haltestellensuche (`find_stops`)                                 | ✅                                                                                                                                                                                                                             |
+| Umkreissuche (`nearby_stops`)                                    | ✅ liefert aber auch POIs, kein reiner Stop-Filter                                                                                                                                                                             |
+| Echtzeit-Abfahrten (`station_board`)                             | ✅ inkl. Soll/Ist-Zeiten                                                                                                                                                                                                       |
+| Fahrtausfälle (`isCncl`-Flag)                                    | ✅ vorhanden, noch nicht gegen echten Ausfall verifiziert                                                                                                                                                                      |
+| Zwischenhalte einer Fahrt (`journey_details`)                    | ✅                                                                                                                                                                                                                             |
+| Verbindungssuche (`trip_search`)                                 | ✅                                                                                                                                                                                                                             |
+| Störungsmeldungen (`service_alerts`)                             | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — `line="133"` filtert serverseitig, `stop=…` client-seitig (Loc-Referenz + Namensabgleich im Text). Die eingestreute KVB-Werbung (`category == 99`) musst du selbst rausfiltern |
+| Haltestellen-Detail + alle Linien (`stop_details`, `stop_lines`) | ✅ aus dem Fahrplan (`LocDetails.pRefL`), nicht nur die nächsten Abfahrten                                                                                                                                                     |
+| Isochrone „was ist in X Minuten erreichbar“ (`reachable_stops`)  | ✅ Steige werden auf die Haltestelle zusammengefasst                                                                                                                                                                           |
+| Live-Fahrzeugpositionen (`vehicle_positions`)                    | ✅ Bounding-Box, Positionen sind aus Fahrplan + Prognose hochgerechnet, kein GPS                                                                                                                                               |
+| Liniensuche & -details (`find_lines`, `line_details`)            | ✅ inkl. Betreiber und Fahrtenzahl; das Schema für Pünktlichkeitsstatistik ist da, aber von der KVB nicht befüllt                                                                                                              |
+| Fahrten einer Linie inkl. Verkehrstage (`find_journeys`)         | ✅ `sDaysI` im Klartext („Mo - Fr; nicht 10. bis 28. Aug“)                                                                                                                                                                     |
+| Linienverlauf als Polyline (`journey_course`)                    | ✅ ein Punkt pro Halt, Google-Encoded-Polyline                                                                                                                                                                                 |
+| Verbindung wiederherstellen (`reconstruct`)                      | ✅ über `Connection.ctx_recon`, holt frische Echtzeitdaten ohne neue Suche                                                                                                                                                     |
+| Fahrplanperiode / Serverzeit (`server_info`)                     | ✅                                                                                                                                                                                                                             |
+| Aktuell betroffene Haltestellen (`affected_stops`)               | ✅ kurze Liste „wo klemmt es gerade", parameterlos                                                                                                                                                                             |
+| Linien im Umkreis (`lines_in_area`)                              | ✅ vollständiger als `stop_details().lines` — enthält auch die Nachtlinien; Server deckelt bei 50                                                                                                                              |
+| Störungen im Kartenausschnitt (`alerts_in_area`)                 | ⚠️ funktioniert, war für Köln aber immer leer — nur Meldungen mit Geo-Bezug                                                                                                                                                    |
+| Fußweg straßengenau (`walk_route`)                               | ✅ Polyline zu einem Fußweg-Abschnitt aus `trip_search` (`Leg.gis_ctx`); freies A-nach-B-Routing geht nicht, der Server akzeptiert nur selbst ausgegebene Tokens                                                               |
+| Alternativen zu einer Verbindung (`trip_alternatives`)           | ✅ über `Connection.ctx_recon`, liefert spätere Verbindungen auf derselben Relation                                                                                                                                            |
+| Push-Abos (`Subscr*`)                                            | ⚠️ Methoden existieren, brauchen aber ein Nutzerkonto — und sind die einzigen schreibenden, daher bewusst nicht angefasst                                                                                                      |
+| Historische Daten jeder Art                                      | ❌ kein Archiv, keine abgelaufenen Störungsmeldungen, keine Archiv-Methode — mit Messwerten belegt in [docs/API.md](docs/API.md#historische-daten)                                                                             |
+| Auslastungsdaten                                                 | ❌ nicht gefunden, vermutlich von KVB nicht befüllt                                                                                                                                                                            |
+| Tarife/Preise                                                    | ❌ keine einzige Preis-Methode vorhanden (alles `HAMM`)                                                                                                                                                                        |
 
 **Vollständige API-Referenz mit allen Feldern, Beispiel-Requests und
 Fehlercodes:** [docs/API.md](docs/API.md)

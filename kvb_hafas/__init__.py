@@ -1,7 +1,9 @@
-from .client import (
+"""Inoffizieller Python-Client für die HAFAS-Echtzeitdaten der KVB."""
+
+from kvb_hafas.client import KVBHafasClient
+from kvb_hafas.models import (
     Connection,
     Departure,
-    KVBHafasClient,
     JourneyRoute,
     JourneyStop,
     KVBHafasError,
@@ -12,10 +14,10 @@ from .client import (
     ServerInfo,
     ServiceAlert,
     Stop,
-    station_ext_id,
     Vehicle,
     WalkRoute,
 )
+from kvb_hafas.parsing import station_ext_id
 
 __all__ = [
     "KVBHafasClient",

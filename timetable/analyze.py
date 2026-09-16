@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""analyze.sql ausführen und die Ergebnisblöcke ausgeben.
+"""timetable/analyze.sql ausführen und die Ergebnisblöcke ausgeben.
 
-    uv run analyze.py --db timetable.db
+    uv run -m timetable.analyze --db timetable.db
 
 Nur nötig, weil das `sqlite3`-Kommandozeilentool nicht überall installiert
-ist; mit CLI tut es auch `sqlite3 -box timetable.db < analyze.sql`.
+ist; mit CLI tut es auch `sqlite3 -box timetable.db < timetable/analyze.sql`.
 """
 
 from __future__ import annotations
@@ -13,11 +13,13 @@ import argparse
 import pathlib
 import sqlite3
 
+DEFAULT_SQL = pathlib.Path(__file__).with_name("analyze.sql")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="timetable.db")
-    ap.add_argument("--sql", default="analyze.sql")
+    ap.add_argument("--sql", default=str(DEFAULT_SQL))
     args = ap.parse_args()
 
     script = pathlib.Path(args.sql).read_text()

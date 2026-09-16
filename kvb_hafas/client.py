@@ -13,11 +13,29 @@ verwenden.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
 import requests
+
+from kvb_hafas.models import (
+    Connection,
+    Departure,
+    JourneyRoute,
+    JourneyStop,
+    KVBHafasError,
+    Leg,
+    Line,
+    Reachable,
+    ScheduledJourney,
+    ServerInfo,
+    ServiceAlert,
+    Stop,
+    Vehicle,
+    WalkRoute,
+)
+from kvb_hafas.parsing import _decode_polyline, _line_from_prod, _mast_steig, station_ext_id
 
 ENDPOINT = "https://auskunft.kvb.koeln/gate"
 # Public HAFAS access ID, served in cleartext by the KVB widget generator at
@@ -26,241 +44,6 @@ ENDPOINT = "https://auskunft.kvb.koeln/gate"
 # it; that is a false positive. KVB can rotate or block it at any time.
 AID = "Rt6foY5zcTTRXMQs"
 USER_AGENT = "Mozilla/5.0 (compatible; kvb-hafas-client/0.1)"
-
-
-class KVBHafasError(Exception):
-    """Raised when the HAFAS gate returns a non-OK error code."""
-
-
-@dataclass
-class Stop:
-    name: str
-    ext_id: str
-    lat: float | None = None
-    lon: float | None = None
-    lines: tuple[str, ...] = ()  # only filled by nearby_stops(with_lines=True)
-
-
-@dataclass
-class Departure:
-    line: str
-    direction: str
-    planned: str  # HHMMSS-ish HAFAS time string, e.g. "224400"
-    realtime: str | None
-    platform: str | None
-    cancelled: bool
-    jid: str  # pass to client.journey_details() for the full stop sequence
-
-
-@dataclass
-class ServiceAlert:
-    text: str
-    category: int  # cat: 1=Aufzug/Fahrzeuge, 2/3=Baumaßnahme/Verlegung, 99=Marketing (unverifizierte Zuordnung)
-    priority: int
-    valid_from: str  # sDate (YYYYMMDD)
-    valid_to: str  # eDate (YYYYMMDD)
-
-
-@dataclass
-class Leg:
-    """Ein Abschnitt einer Verbindung: entweder eine Fahrt oder ein Fußweg."""
-
-    walk: bool
-    from_name: str
-    to_name: str
-    dep_time: str
-    arr_time: str
-    line: str | None = None  # None bei Fußweg
-    direction: str | None = None
-    dep_platform: str | None = None
-    arr_platform: str | None = None
-    dist_m: int | None = None  # nur bei Fußweg
-    gis_ctx: str = ""  # nur bei Fußweg: Token für walk_route(), siehe docs/API.md#gisroute
-
-
-@dataclass
-class Connection:
-    dep_time: str
-    arr_time: str
-    num_changes: int  # Anzahl Fahrt-Abschnitte - 1 (Fußwege zählen nicht)
-    legs: list[Leg] = field(default_factory=list)
-    ctx_recon: str = ""  # Token für reconstruct(), siehe docs/API.md#reconstruction
-
-
-@dataclass
-class WalkRoute:
-    """Straßengenauer Fußweg zu einem Fußweg-Abschnitt (GisRoute)."""
-
-    dist_m: int
-    duration: str  # HAFAS-Dauer "HHMMSS"
-    points: list[tuple[float, float]] = field(default_factory=list)
-
-
-@dataclass
-class ServerInfo:
-    """Fahrplanperiode und Serverzeit (ServerInfo)."""
-
-    timetable_from: str  # fpB (YYYYMMDD) — frühestes abfragbares Datum
-    timetable_to: str  # fpE
-    date: str  # Serverdatum
-    time: str  # Serverzeit
-
-
-@dataclass
-class Line:
-    name: str  # Label wie auf dem Abfahrtsmonitor ("18", "146")
-    line_id: str  # z.B. "de:vrs:18" — Eingabe für line_details()
-    category: str | None = None  # catOut: "Str" (Stadtbahn), "Bus", ...
-    operator: str | None = None
-    journeys: int | None = None  # stat.cnt: Fahrten im Fahrplan
-    stats: dict[str, Any] = field(default_factory=dict)  # roher stat-Block, siehe line_details()
-
-
-@dataclass
-class Vehicle:
-    """Live-Position eines Fahrzeugs (JourneyGeoPos)."""
-
-    line: str
-    direction: str
-    lat: float
-    lon: float
-    jid: str
-
-
-@dataclass
-class Reachable:
-    stop: Stop
-    minutes: int  # Reisezeit ab Startpunkt
-    changes: int
-
-
-@dataclass
-class JourneyStop:
-    """Ein Halt im Laufweg einer Fahrt (JourneyDetails)."""
-
-    idx: int  # Position im Laufweg, 0 = Startpunkt
-    stop: Stop  # ext_id ist die Mast-ID (300xxxxxNN), nicht die Haltestellen-ID
-    arr_planned: str | None  # HAFAS-Zeitstring, ggf. mit Tagesübertrags-Präfix
-    dep_planned: str | None
-    arr_realtime: str | None = None
-    dep_realtime: str | None = None
-    cancelled: bool = False
-    station_ext_id: str | None = None  # Master-Haltestelle, beide Richtungen gemeinsam
-
-
-@dataclass
-class JourneyRoute:
-    """Kompletter Laufweg einer Fahrt, Halte bereits aufgelöst."""
-
-    jid: str
-    line: str
-    direction: str
-    date: str  # YYYYMMDD, Betriebstag der Fahrt
-    service_days: str  # sDaysI, Klartext ("16. bis 30. Sep 2026 Mo - Fr")
-    service_bits: str  # sDaysB, Bitmaske ab fpB (siehe server_info())
-    stops: list[JourneyStop] = field(default_factory=list)
-
-
-@dataclass
-class ScheduledJourney:
-    """Eine Fahrt aus dem Fahrplan (JourneyMatch) — ohne Echtzeit."""
-
-    line: str
-    from_name: str
-    to_name: str
-    dep_time: str
-    arr_time: str
-    jid: str
-    service_days: str  # Klartext, z.B. "Mo - Fr; nicht 10. bis 28. Aug"
-
-
-
-def _line_from_prod(prod: dict[str, Any], line_id: str, op_l: list[dict[str, Any]] | None = None) -> Line:
-    ctx = prod.get("prodCtx", {})
-    stats = prod.get("stat", {})
-    op_idx = prod.get("oprX")
-    operator = None
-    if op_l and op_idx is not None and op_idx < len(op_l):
-        operator = op_l[op_idx].get("name")
-    return Line(
-        name=prod.get("name", ""),
-        line_id=line_id or ctx.get("lineId", ""),
-        category=ctx.get("catOut"),
-        operator=operator,
-        journeys=stats.get("cnt"),
-        stats=stats,
-    )
-
-
-def _decode_polyline(encoded: str) -> list[tuple[float, float]]:
-    """Google-Encoded-Polyline -> [(lat, lon), ...].
-
-    HAFAS liefert `polyL[].crdEncYX` in genau diesem Format (`delta: true`,
-    Faktor 1e5), dasselbe wie Google Maps.
-    """
-    points: list[tuple[float, float]] = []
-    lat = lon = index = 0
-    while index < len(encoded):
-        for axis in range(2):
-            shift = result = 0
-            while True:
-                byte = ord(encoded[index]) - 63
-                index += 1
-                result |= (byte & 0x1F) << shift
-                shift += 5
-                if byte < 0x20:
-                    break
-            delta = ~(result >> 1) if result & 1 else result >> 1
-            if axis == 0:
-                lat += delta
-            else:
-                lon += delta
-        points.append((lat / 1e5, lon / 1e5))
-    return points
-
-
-def station_ext_id(mast_ext_id: str) -> str | None:
-    """Mast-ID (`300xxxxxNN`) -> Haltestellen-ID (`900xxxxxx`).
-
-    JourneyDetails referenziert Halte richtungsscharf über Mast-IDs, während
-    find_stops() und alle anderen Methoden die Master-Haltestelle erwarten.
-    Beide hängen über die KVB-Haltestellennummer zusammen:
-
-        Mast  = "300" + nummer(4-stellig) + steig(2-stellig)
-        Halt  = 900000000 + nummer
-
-    z.B. `300090301` -> `900000903` (Sparkasse am Butzweilerhof).
-
-    Gibt `None` für alles, was nicht wie eine Mast-ID aussieht — unter anderem
-    für Master-IDs selbst, die also nicht versehentlich umgerechnet werden.
-
-    ponytail: Heuristik auf dem ID-Schema, kein dokumentiertes Feld. HAFAS
-    liefert hier kein `mMastLocX`, mit dem man es sauber auflösen könnte.
-    Verifiziert an den 34 Masten der Linie 5 (34/34). Bricht, wenn KVB die
-    Mast-IDs umstellt.
-    """
-    if len(mast_ext_id) != 9 or not mast_ext_id.startswith("300") or not mast_ext_id.isdigit():
-        return None
-    return str(900_000_000 + int(mast_ext_id[3:7]))
-
-
-def _mast_steig(loc_l: list[dict[str, Any]], loc_x: int | None) -> str | None:
-    """Steig aus der Mast-extId ableiten, wenn HAFAS kein dPlatf liefert.
-
-    Kleinere Haltestellen haben keine Gleisangabe, aber `stbStop.locX` zeigt auf
-    den konkreten Mast in `common.locL`: die 9-stellige Haltestellen-ID
-    (9000002 49) erscheint dort als 3000249 0X, letzte Ziffer = Steig.
-    Der übergeordnete Eintrag (extId 900...) hat keinen Steig -> None.
-
-    ponytail: Heuristik auf dem ID-Schema, kein dokumentiertes Feld. Bricht,
-    wenn KVB die Mast-IDs umstellt — dann fällt nur der Fallback weg.
-    """
-    if loc_x is None or loc_x >= len(loc_l):
-        return None
-    ext_id = loc_l[loc_x].get("extId", "")
-    if len(ext_id) == 9 and ext_id.startswith("3") and ext_id[-1] != "0":
-        return f"Steig {ext_id[-1]}"
-    return None
 
 
 class KVBHafasClient:

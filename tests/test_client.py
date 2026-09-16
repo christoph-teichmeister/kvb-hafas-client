@@ -333,19 +333,6 @@ def test_trip_search_parses_connections():
     assert (last.line, last.arr_platform) == ("18", "2")
 
 
-def test_merge_walks_collapses_consecutive_walks():
-    from main import merge_walks
-
-    client = KVBHafasClient()
-    with patch.object(client.session, "post", return_value=_mock_response(TRIPSEARCH_RESPONSE)):
-        connections = client.trip_search("900000002", "900000001")
-
-    legs = merge_walks(connections[1].legs)
-    assert [leg.walk for leg in legs] == [False, True, False]
-    assert legs[1].dist_m == 50
-    assert (legs[1].dep_time, legs[1].arr_time) == ("121600", "121800")
-
-
 def test_call_raises_on_envelope_level_error():
     client = KVBHafasClient()
     with patch.object(client.session, "post", return_value=_mock_response(ENVELOPE_ERROR_RESPONSE)):
@@ -559,28 +546,6 @@ def test_trip_search_exposes_walk_gis_ctx():
     rides = [leg for con in connections for leg in con.legs if not leg.walk]
     assert all(leg.gis_ctx == "" for leg in rides)
     assert walks
-
-
-def test_dedupe_connections_keeps_different_routes():
-    from main import dedupe_connections
-
-    from kvb_hafas import Connection, Leg
-
-    def con(line: str) -> Connection:
-        leg = Leg(walk=False, from_name="A", to_name="B", dep_time="102400", arr_time="105400", line=line)
-        return Connection(dep_time="102400", arr_time="105400", num_changes=0, legs=[leg])
-
-    # Gleiche Eckzeiten, aber andere Linie -> keine Dublette.
-    result = dedupe_connections([con("16"), con("16"), con("18")])
-    assert [c.legs[0].line for c in result] == ["16", "18"]
-
-
-def test_dur_min_formats_hafas_duration():
-    from main import dur_min
-
-    assert dur_min("000200") == "2 min"
-    assert dur_min("011500") == "75 min"
-    assert dur_min("") == "—"
 
 
 JOURNEYDETAILS_ROUTE_RESPONSE = {

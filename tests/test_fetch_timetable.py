@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta
 
-import fetch_timetable as ft
+from timetable import fetch as ft
 
 SERVICE_DATE = date(2026, 9, 17)
 
