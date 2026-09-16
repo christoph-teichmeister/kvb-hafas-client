@@ -68,7 +68,10 @@ for dep in client.station_board(stops[0].ext_id):
     print(dep.planned, dep.realtime, dep.line, dep.direction, dep.cancelled)
 ```
 
-Oder interaktiv über die CLI (Menü mit Abfahrten, Verbindungssuche, Umkreissuche, Störungsmeldungen):
+Oder interaktiv über die CLI (Menü mit Abfahrten, Verbindungssuche, Umkreissuche,
+Störungsmeldungen, Isochrone, Live-Fahrzeugen, Liniendetails und Serverinfo).
+Nach einer Verbindungssuche lässt sich jede Verbindung im Detail weiterverfolgen:
+spätere Alternativen, Fußwege straßengenau, Echtzeit nachladen.
 
 ```bash
 uv run main.py
@@ -89,8 +92,21 @@ Die Library selbst hängt nur an `requests`. Die CLI nutzt zusätzlich `question
 | Zwischenhalte einer Fahrt (`journey_details`)              | ✅                                                                                                                                                                                                                             |
 | Verbindungssuche (`trip_search`)                           | ✅                                                                                                                                                                                                                             |
 | Störungsmeldungen (`service_alerts`)                       | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — `line="133"` filtert serverseitig, `stop=…` client-seitig (Loc-Referenz + Namensabgleich im Text). Die eingestreute KVB-Werbung (`category == 99`) musst du selbst rausfiltern |
+| Haltestellen-Detail + alle Linien (`stop_details`, `stop_lines`) | ✅ aus dem Fahrplan (`LocDetails.pRefL`), nicht nur die nächsten Abfahrten                                                                                                                                              |
+| Isochrone „was ist in X Minuten erreichbar“ (`reachable_stops`) | ✅ Steige werden auf die Haltestelle zusammengefasst                                                                                                                                                                    |
+| Live-Fahrzeugpositionen (`vehicle_positions`)              | ✅ Bounding-Box, Positionen sind aus Fahrplan + Prognose hochgerechnet, kein GPS                                                                                                                                               |
+| Liniensuche & -details (`find_lines`, `line_details`)      | ✅ inkl. Betreiber und Fahrtenzahl; das Schema für Pünktlichkeitsstatistik ist da, aber von der KVB nicht befüllt                                                                                                              |
+| Fahrten einer Linie inkl. Verkehrstage (`find_journeys`)   | ✅ `sDaysI` im Klartext („Mo - Fr; nicht 10. bis 28. Aug“)                                                                                                                                                                     |
+| Linienverlauf als Polyline (`journey_course`)              | ✅ ein Punkt pro Halt, Google-Encoded-Polyline                                                                                                                                                                                 |
+| Verbindung wiederherstellen (`reconstruct`)                | ✅ über `Connection.ctx_recon`, holt frische Echtzeitdaten ohne neue Suche                                                                                                                                                     |
+| Fahrplanperiode / Serverzeit (`server_info`)               | ✅                                                                                                                                                                                                                             |
+| Störungen im Kartenausschnitt (`alerts_in_area`)           | ⚠️ funktioniert, war für Köln aber immer leer — nur Meldungen mit Geo-Bezug                                                                                                                                                    |
+| Fußweg straßengenau (`walk_route`)                         | ✅ Polyline zu einem Fußweg-Abschnitt aus `trip_search` (`Leg.gis_ctx`); freies A-nach-B-Routing geht nicht, der Server akzeptiert nur selbst ausgegebene Tokens                                                                |
+| Alternativen zu einer Verbindung (`trip_alternatives`)     | ✅ über `Connection.ctx_recon`, liefert spätere Verbindungen auf derselben Relation                                                                                                                                            |
+| Push-Abos (`Subscr*`)                                      | ⚠️ Methoden existieren, brauchen aber ein Nutzerkonto — und sind die einzigen schreibenden, daher bewusst nicht angefasst                                                                                                      |
 | Historische Ist-Daten (Verspätungen/Ausfälle rückblickend) | ❌ nicht verfügbar, nur der Fahrplan der aktuellen Periode — siehe [docs/API.md](docs/API.md#historische-daten)                                                                                                                |
 | Auslastungsdaten                                           | ❌ nicht gefunden, vermutlich von KVB nicht befüllt                                                                                                                                                                            |
+| Tarife/Preise                                              | ❌ keine einzige Preis-Methode vorhanden (alles `HAMM`)                                                                                                                                                                        |
 
 **Vollständige API-Referenz mit allen Feldern, Beispiel-Requests und
 Fehlercodes:** [docs/API.md](docs/API.md)
@@ -106,9 +122,8 @@ den KVB-Server nötig.
 
 ## Nächste Schritte / Ideen
 
-- `journey_details()`-Methode für Zwischenhalte (Rohdaten liegen in `stopL`
-  jedes Journey-Objekts).
-- `himL`/`msgL` (Störungsmeldungen) zusätzlich zum `isCncl`-Flag auswerten.
+- Kartenansicht aus `vehicle_positions()` + `journey_course()` bauen — die
+  `ani`-Tracks liefern die Zwischenschritte für flüssige Animation mit.
 - Persistenz/Zeitreihen für eigene Auslastungs-Heuristik (z.B. Ist- vs.
   Soll-Abweichung über Zeit als Proxy für Verspätungshäufigkeit).
 

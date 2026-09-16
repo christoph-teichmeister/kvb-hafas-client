@@ -41,6 +41,13 @@ def ddmm(d: str) -> str:
     return f"{d[6:8]}.{d[4:6]}." if len(d) == 8 and d.isdigit() else d
 
 
+def dur_min(d: str) -> str:
+    """HAFAS-Dauer ("000200") -> "2 min"; leer -> "—"."""
+    if len(d) != 6 or not d.isdigit():
+        return "—"
+    return f"{int(d[:2]) * 60 + int(d[2:4])} min"
+
+
 def delay_min(planned: str, realtime: str) -> int:
     """Verspätung in Minuten aus zwei HAFAS-Zeiten (ohne Tagesüberlauf)."""
 
@@ -185,6 +192,81 @@ def connection_tree(con: Connection) -> Tree:
     return tree
 
 
+def dedupe_connections(cons: list[Connection]) -> list[Connection]:
+    """Identische Verbindungen rauswerfen — SearchOnTrip liefert Dubletten.
+
+    Signatur über alle Abschnitte, nicht nur Ab/An: zwei Verbindungen mit
+    gleichen Eckzeiten können echt verschiedene Wege sein.
+    """
+    seen, out = set(), []
+    for con in cons:
+        key = (con.dep_time, con.arr_time, tuple((leg.line, leg.dep_time, leg.from_name) for leg in con.legs))
+        if key not in seen:
+            seen.add(key)
+            out.append(con)
+    return out
+
+
+def show_walk_routes(client: KVBHafasClient, con: Connection) -> None:
+    """Zu jedem Fußweg der Verbindung die straßengenaue Geometrie holen."""
+    # Ungemergte Legs: merge_walks() fasst Fußwege zusammen und behält dabei
+    # nur den gis_ctx des ersten — hier braucht jeder Abschnitt seinen eigenen.
+    walks = [leg for leg in con.legs if leg.walk and leg.gis_ctx and leg.dist_m]
+    if not walks:
+        console.print("[dim]Kein Fußweg mit Geometrie in dieser Verbindung.[/]")
+        return
+    table = Table(box=box.SIMPLE, header_style="dim")
+    table.add_column("Abschnitt")
+    table.add_column("Meter", justify="right")
+    table.add_column("Dauer", justify="right")
+    table.add_column("Stützpunkte", justify="right")
+    table.add_column("Start → Ziel", style="dim")
+    with console.status("[cyan]Lade Fußwege…"):
+        for leg in walks:
+            route = client.walk_route(leg.gis_ctx)
+            ends = ""
+            if route.points:
+                first, last = route.points[0], route.points[-1]
+                ends = f"{first[0]:.5f},{first[1]:.5f} → {last[0]:.5f},{last[1]:.5f}"
+            table.add_row(
+                f"{esc(leg.from_name)} → {esc(leg.to_name)}",
+                str(route.dist_m),
+                dur_min(route.duration),
+                str(len(route.points)),
+                ends,
+            )
+    console.print(panel("Fußwege straßengenau", table))
+
+
+def show_connection_detail(client: KVBHafasClient, con: Connection) -> None:
+    """Folgeabfragen zu einer ausgewählten Verbindung."""
+    while True:
+        idx = choose(
+            f"{hhmm(con.dep_time)} → {hhmm(con.arr_time)}",
+            ["Spätere Alternativen", "Fußwege straßengenau", "Echtzeit aktualisieren", "zurück"],
+        )
+        if idx is None or idx == 3:
+            return
+        if idx == 0:
+            with console.status("[cyan]Suche Alternativen…"):
+                alts = client.trip_alternatives(con.ctx_recon)
+            alts = dedupe_connections(alts)
+            if not alts:
+                console.print("[dim]Keine Alternativen.[/]")
+                continue
+            console.print(panel(f"Alternativen ({len(alts)})", Group(*(connection_tree(a) for a in alts[:8]))))
+        elif idx == 1:
+            show_walk_routes(client, con)
+        else:
+            with console.status("[cyan]Hole frische Echtzeitdaten…"):
+                fresh = client.reconstruct(con.ctx_recon)
+            if not fresh:
+                console.print("[dim]Verbindung nicht mehr auflösbar.[/]")
+                continue
+            con = fresh[0]
+            console.print(panel("Aktualisiert", connection_tree(con)))
+
+
 def show_trip(client: KVBHafasClient) -> None:
     start = pick_stop(client, "Start")
     if not start:
@@ -202,6 +284,13 @@ def show_trip(client: KVBHafasClient) -> None:
         console.print(panel(title, "[dim]keine Verbindung gefunden[/]"))
         return
     console.print(panel(title, Group(*(connection_tree(con) for con in cons))))
+
+    while True:
+        labels = [f"{hhmm(c.dep_time)} → {hhmm(c.arr_time)}  ({c.num_changes} Ums.)" for c in cons]
+        idx = choose("Verbindung im Detail", [*labels, "zurück"])
+        if idx is None or idx == len(cons):
+            return
+        show_connection_detail(client, cons[idx])
 
 
 def alert_table(alerts: list[ServiceAlert]) -> Table | str:
@@ -259,11 +348,117 @@ def show_nearby(client: KVBHafasClient) -> None:
     console.print(panel(title, table))
 
 
+def show_reachable(client: KVBHafasClient) -> None:
+    stop = pick_stop(client)
+    if not stop:
+        return
+    minutes = ask("Maximale Fahrzeit in Minuten", "15")
+    changes = ask("Maximale Umstiege", "0")
+    with console.status("[cyan]Berechne Einzugsgebiet…"):
+        reachable = client.reachable_stops(
+            stop.ext_id,
+            max_minutes=int(minutes) if minutes.isdigit() else 15,
+            max_changes=int(changes) if changes.isdigit() else 0,
+        )
+    title = f"Ab {esc(stop.name)} in {minutes} min erreichbar"
+    if not reachable:
+        console.print(panel(title, "[dim]nichts gefunden[/]"))
+        return
+    table = Table(box=box.SIMPLE, header_style="dim")
+    table.add_column("Min", justify="right", style="bold")
+    table.add_column("Ums.", justify="right", style="dim")
+    table.add_column("Haltestelle")
+    for entry in reachable:
+        table.add_row(str(entry.minutes), str(entry.changes), esc(entry.stop.name))
+    console.print(panel(f"{title} ({len(reachable)})", table))
+
+
+def show_vehicles(client: KVBHafasClient) -> None:
+    try:
+        lat = float(ask("Breitengrad (lat)", "50.9375"))
+        lon = float(ask("Längengrad (lon)", "6.9603"))
+        radius_km = float(ask("Radius in km", "2"))
+    except ValueError:
+        console.print("[red]Ungültige Eingabe.[/]")
+        return
+    # Grobe Grad-Umrechnung; reicht für eine Bounding-Box auf Kölner Breite.
+    d_lat = radius_km / 111.0
+    d_lon = radius_km / 71.0
+    with console.status("[cyan]Lade Fahrzeugpositionen…"):
+        vehicles = client.vehicle_positions(lat - d_lat, lon - d_lon, lat + d_lat, lon + d_lon)
+    title = f"Fahrzeuge im Umkreis von {radius_km} km"
+    if not vehicles:
+        console.print(panel(title, "[dim]keine unterwegs[/]"))
+        return
+    table = Table(box=box.SIMPLE, header_style="dim")
+    table.add_column("Linie", style="cyan bold", justify="right")
+    table.add_column("Richtung")
+    table.add_column("Position", style="dim")
+    for vehicle in vehicles:
+        table.add_row(esc(vehicle.line), esc(vehicle.direction), f"{vehicle.lat:.5f}, {vehicle.lon:.5f}")
+    console.print(panel(f"{title} ({len(vehicles)})", table))
+
+
+def show_line(client: KVBHafasClient) -> None:
+    query = ask("Linie suchen (z.B. 18, 146)")
+    if not query:
+        return
+    with console.status("[cyan]Suche Linien…"):
+        lines = client.find_lines(query)
+    if not lines:
+        console.print("[dim]Keine Linie gefunden.[/]")
+        return
+    idx = choose("Treffer", [f"{ln.name}  ({ln.line_id})" for ln in lines])
+    if idx is None:
+        return
+    with console.status("[cyan]Lade Liniendetails…"):
+        line = client.line_details(lines[idx].line_id)
+        journeys = client.find_journeys(line.name)
+    head = Table(box=box.SIMPLE, show_header=False)
+    head.add_column("", style="dim")
+    head.add_column("")
+    head.add_row("Linie", f"[cyan bold]{esc(line.name)}[/]  [dim]{esc(line.line_id)}[/]")
+    head.add_row("Art", esc(line.category or "—"))
+    head.add_row("Betreiber", esc(line.operator or "—"))
+    head.add_row("Fahrten im Fahrplan", str(line.journeys if line.journeys is not None else "—"))
+    parts: list[object] = [head]
+    if journeys:
+        table = Table(box=box.SIMPLE, header_style="dim")
+        table.add_column("Ab", justify="right")
+        table.add_column("An", justify="right")
+        table.add_column("Von → Nach")
+        table.add_column("Verkehrstage", style="dim")
+        for jny in journeys[:10]:
+            table.add_row(
+                hhmm(jny.dep_time),
+                hhmm(jny.arr_time),
+                f"{esc(jny.from_name)} → {esc(jny.to_name)}",
+                esc(jny.service_days),
+            )
+        parts.append(table)
+    console.print(panel(f"Linie {esc(line.name)}", Group(*parts)))
+
+
+def show_server_info(client: KVBHafasClient) -> None:
+    with console.status("[cyan]Frage Server…"):
+        info = client.server_info()
+    table = Table(box=box.SIMPLE, show_header=False)
+    table.add_column("", style="dim")
+    table.add_column("")
+    table.add_row("Fahrplanperiode", f"{ddmm(info.timetable_from)}{info.timetable_from[:4]} – {ddmm(info.timetable_to)}{info.timetable_to[:4]}")
+    table.add_row("Serverzeit", f"{ddmm(info.date)}{info.date[:4]} {hhmm(info.time)}")
+    console.print(panel("Server", table))
+
+
 MENU: list[tuple[str, object]] = [
     ("Abfahrten einer Haltestelle", show_departures),
     ("Verbindung suchen", show_trip),
     ("Haltestellen in der Nähe", show_nearby),
     ("Störungsmeldungen", show_alerts),
+    ("Erreichbar in X Minuten", show_reachable),
+    ("Fahrzeuge live in der Nähe", show_vehicles),
+    ("Linie nachschlagen", show_line),
+    ("Serverinfo / Fahrplanperiode", show_server_info),
     ("Beenden", None),
 ]
 

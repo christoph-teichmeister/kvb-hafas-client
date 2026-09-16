@@ -4,8 +4,14 @@ from .client import (
     KVBHafasClient,
     KVBHafasError,
     Leg,
+    Line,
+    Reachable,
+    ScheduledJourney,
+    ServerInfo,
     ServiceAlert,
     Stop,
+    Vehicle,
+    WalkRoute,
 )
 
 __all__ = [
@@ -15,5 +21,11 @@ __all__ = [
     "ServiceAlert",
     "Connection",
     "Leg",
+    "Line",
+    "Reachable",
+    "ScheduledJourney",
+    "ServerInfo",
+    "Vehicle",
+    "WalkRoute",
     "KVBHafasError",
 ]

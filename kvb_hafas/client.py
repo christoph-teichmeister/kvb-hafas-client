@@ -13,6 +13,7 @@ verwenden.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -73,6 +74,7 @@ class Leg:
     dep_platform: str | None = None
     arr_platform: str | None = None
     dist_m: int | None = None  # nur bei Fußweg
+    gis_ctx: str = ""  # nur bei Fußweg: Token für walk_route(), siehe docs/API.md#gisroute
 
 
 @dataclass
@@ -81,7 +83,112 @@ class Connection:
     arr_time: str
     num_changes: int  # Anzahl Fahrt-Abschnitte - 1 (Fußwege zählen nicht)
     legs: list[Leg] = field(default_factory=list)
+    ctx_recon: str = ""  # Token für reconstruct(), siehe docs/API.md#reconstruction
 
+
+@dataclass
+class WalkRoute:
+    """Straßengenauer Fußweg zu einem Fußweg-Abschnitt (GisRoute)."""
+
+    dist_m: int
+    duration: str  # HAFAS-Dauer "HHMMSS"
+    points: list[tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class ServerInfo:
+    """Fahrplanperiode und Serverzeit (ServerInfo)."""
+
+    timetable_from: str  # fpB (YYYYMMDD) — frühestes abfragbares Datum
+    timetable_to: str  # fpE
+    date: str  # Serverdatum
+    time: str  # Serverzeit
+
+
+@dataclass
+class Line:
+    name: str  # Label wie auf dem Abfahrtsmonitor ("18", "146")
+    line_id: str  # z.B. "de:vrs:18" — Eingabe für line_details()
+    category: str | None = None  # catOut: "Str" (Stadtbahn), "Bus", ...
+    operator: str | None = None
+    journeys: int | None = None  # stat.cnt: Fahrten im Fahrplan
+    stats: dict[str, Any] = field(default_factory=dict)  # roher stat-Block, siehe line_details()
+
+
+@dataclass
+class Vehicle:
+    """Live-Position eines Fahrzeugs (JourneyGeoPos)."""
+
+    line: str
+    direction: str
+    lat: float
+    lon: float
+    jid: str
+
+
+@dataclass
+class Reachable:
+    stop: Stop
+    minutes: int  # Reisezeit ab Startpunkt
+    changes: int
+
+
+@dataclass
+class ScheduledJourney:
+    """Eine Fahrt aus dem Fahrplan (JourneyMatch) — ohne Echtzeit."""
+
+    line: str
+    from_name: str
+    to_name: str
+    dep_time: str
+    arr_time: str
+    jid: str
+    service_days: str  # Klartext, z.B. "Mo - Fr; nicht 10. bis 28. Aug"
+
+
+
+def _line_from_prod(prod: dict[str, Any], line_id: str, op_l: list[dict[str, Any]] | None = None) -> Line:
+    ctx = prod.get("prodCtx", {})
+    stats = prod.get("stat", {})
+    op_idx = prod.get("oprX")
+    operator = None
+    if op_l and op_idx is not None and op_idx < len(op_l):
+        operator = op_l[op_idx].get("name")
+    return Line(
+        name=prod.get("name", ""),
+        line_id=line_id or ctx.get("lineId", ""),
+        category=ctx.get("catOut"),
+        operator=operator,
+        journeys=stats.get("cnt"),
+        stats=stats,
+    )
+
+
+def _decode_polyline(encoded: str) -> list[tuple[float, float]]:
+    """Google-Encoded-Polyline -> [(lat, lon), ...].
+
+    HAFAS liefert `polyL[].crdEncYX` in genau diesem Format (`delta: true`,
+    Faktor 1e5), dasselbe wie Google Maps.
+    """
+    points: list[tuple[float, float]] = []
+    lat = lon = index = 0
+    while index < len(encoded):
+        for axis in range(2):
+            shift = result = 0
+            while True:
+                byte = ord(encoded[index]) - 63
+                index += 1
+                result |= (byte & 0x1F) << shift
+                shift += 5
+                if byte < 0x20:
+                    break
+            delta = ~(result >> 1) if result & 1 else result >> 1
+            if axis == 0:
+                lat += delta
+            else:
+                lon += delta
+        points.append((lat / 1e5, lon / 1e5))
+    return points
 
 
 def _mast_steig(loc_l: list[dict[str, Any]], loc_x: int | None) -> str | None:
@@ -217,10 +324,9 @@ class KVBHafasClient:
             stops = [replace(stop, lines=self.stop_lines(stop.ext_id)) for stop in stops]
         return stops
 
-    def stop_lines(self, stop_ext_id: str, max_journeys: int = 30) -> tuple[str, ...]:
-        """Line labels with an upcoming departure at this stop, sorted."""
-        lines = {dep.line for dep in self.station_board(stop_ext_id, max_journeys)}
-        return tuple(sorted(lines - {"?"}, key=lambda name: (len(name), name)))
+    def stop_lines(self, stop_ext_id: str) -> tuple[str, ...]:
+        """Line labels serving this stop, sorted — from the timetable, not the board."""
+        return self.stop_details(stop_ext_id).lines
 
     def journey_details(self, jid: str) -> dict[str, Any]:
         """Fetch full stop-by-stop details for a single journey.
@@ -355,7 +461,10 @@ class KVBHafasClient:
         if time:
             req["outTime"] = time
 
-        res = self._call("TripSearch", req)
+        return self._parse_connections(self._call("TripSearch", req))
+
+    def _parse_connections(self, res: dict[str, Any]) -> list[Connection]:
+        """`outConL` einer TripSearch-/Reconstruction-Antwort in Connections übersetzen."""
         common = res.get("common", {})
         loc_l = common.get("locL", [])
         prod_l = common.get("prodL", [])
@@ -382,6 +491,7 @@ class KVBHafasClient:
                         dep_platform=dep.get("dPlatfR") or dep.get("dPlatfS"),
                         arr_platform=arr.get("aPlatfR") or arr.get("aPlatfS"),
                         dist_m=sec.get("gis", {}).get("dist") if jny is None else None,
+                        gis_ctx=sec.get("gis", {}).get("ctx", "") if jny is None else "",
                     )
                 )
             # Umstiege = Fahrten - 1. secL enthält auch Fußwege (oft mehrere
@@ -394,6 +504,298 @@ class KVBHafasClient:
                     arr_time=con.get("arr", {}).get("aTimeS", ""),
                     num_changes=max(rides - 1, 0),
                     legs=legs,
+                    ctx_recon=con.get("ctxRecon", ""),
                 )
             )
         return connections
+
+    # --- weitere HAFAS-Methoden (siehe docs/API.md) -------------------------
+
+    def server_info(self) -> ServerInfo:
+        """Fahrplanperiode und Serverzeit abfragen (ServerInfo).
+
+        `timetable_from`/`timetable_to` sind die harten Grenzen für alle
+        Datumsangaben — außerhalb antwortet HAFAS mit H9360.
+        """
+        res = self._call("ServerInfo", {})
+        return ServerInfo(
+            timetable_from=res.get("fpB", ""),
+            timetable_to=res.get("fpE", ""),
+            date=res.get("sD", ""),
+            time=res.get("sT", ""),
+        )
+
+    def stop_details(self, stop_ext_id: str) -> Stop:
+        """Haltestellen-Detail inkl. aller bedienenden Linien (LocDetails).
+
+        Anders als stop_lines() über die Abfahrtstafel sind das die Linien
+        laut Fahrplan, unabhängig davon, ob gerade eine Fahrt ansteht.
+        """
+        res = self._call("LocDetails", {"locL": [{"type": "S", "lid": f"A=1@L={stop_ext_id}@"}]})
+        loc_l = res.get("locL", [])
+        if not loc_l:
+            raise KVBHafasError(f"LocDetails returned no location for {stop_ext_id}")
+        loc = loc_l[0]
+        prod_l = res.get("common", {}).get("prodL", [])
+        lines = [prod_l[i].get("name", "") for i in loc.get("pRefL", []) if i < len(prod_l)]
+        crd = loc.get("crd")
+        return Stop(
+            name=loc.get("name", ""),
+            ext_id=loc.get("extId", ""),
+            lat=crd["y"] / 1_000_000 if crd else None,
+            lon=crd["x"] / 1_000_000 if crd else None,
+            lines=tuple(sorted(set(lines) - {""}, key=lambda name: (len(name), name))),
+        )
+
+    def reachable_stops(
+        self,
+        stop_ext_id: str,
+        max_minutes: int = 15,
+        max_changes: int = 0,
+        date: str | None = None,
+        time: str | None = None,
+    ) -> list[Reachable]:
+        """Isochrone: alle Haltestellen, die in max_minutes erreichbar sind (LocGeoReach).
+
+        Der Startpunkt selbst ist als erster Eintrag mit minutes=0 enthalten.
+        `max_changes=0` heißt: nur Direktverbindungen.
+        """
+        req: dict[str, Any] = {
+            "loc": {"type": "S", "lid": f"A=1@L={stop_ext_id}@"},
+            "maxDur": max_minutes,
+            "maxChg": max_changes,
+        }
+        if date:
+            req["date"] = date
+        if time:
+            req["time"] = time
+        res = self._call("LocGeoReach", req)
+        loc_l = res.get("common", {}).get("locL", [])
+        # posL zeigt auf einzelne Steige; pro Haltestelle nur den schnellsten
+        # behalten und auf den Master-Eintrag (extId 900xxxxxx) auflösen.
+        best: dict[str, Reachable] = {}
+        for pos in res.get("posL", []):
+            idx = pos.get("locX")
+            if idx is None or idx >= len(loc_l):
+                continue
+            loc = loc_l[idx]
+            mast = loc.get("mMastLocX")
+            if mast is not None and mast < len(loc_l):
+                loc = loc_l[mast]
+            crd = loc.get("crd")
+            ext_id = loc.get("extId", "")
+            entry = Reachable(
+                stop=Stop(
+                    name=loc.get("name", ""),
+                    ext_id=ext_id,
+                    lat=crd["y"] / 1_000_000 if crd else None,
+                    lon=crd["x"] / 1_000_000 if crd else None,
+                ),
+                minutes=pos.get("dur", 0),
+                changes=pos.get("chg", 0),
+            )
+            if ext_id not in best or entry.minutes < best[ext_id].minutes:
+                best[ext_id] = entry
+        return sorted(best.values(), key=lambda r: (r.minutes, r.stop.name))
+
+    def vehicle_positions(
+        self,
+        min_lat: float,
+        min_lon: float,
+        max_lat: float,
+        max_lon: float,
+        max_vehicles: int = 100,
+    ) -> list[Vehicle]:
+        """Live-Positionen aller Fahrzeuge in einer Bounding-Box (JourneyGeoPos).
+
+        Positionen sind interpoliert (`trainPosMode: CALC`) — HAFAS rechnet
+        sie aus Fahrplan plus Echtzeit-Prognose hoch, es sind keine
+        GPS-Rohdaten. Die Box umfasst auch Regionalzüge im Bediengebiet.
+        """
+        res = self._call(
+            "JourneyGeoPos",
+            {
+                "maxJny": max_vehicles,
+                "onlyRT": False,
+                "rect": {
+                    "llCrd": {"x": round(min_lon * 1_000_000), "y": round(min_lat * 1_000_000)},
+                    "urCrd": {"x": round(max_lon * 1_000_000), "y": round(max_lat * 1_000_000)},
+                },
+                "perSize": 120000,
+                "perStep": 30000,
+                "ageOfReport": True,
+                "trainPosMode": "CALC",
+            },
+        )
+        prod_l = res.get("common", {}).get("prodL", [])
+        vehicles = []
+        for jny in res.get("jnyL", []):
+            pos = jny.get("pos")
+            if not pos:
+                continue
+            prod_idx = jny.get("prodX")
+            vehicles.append(
+                Vehicle(
+                    line=prod_l[prod_idx].get("name", "") if prod_idx is not None and prod_idx < len(prod_l) else "",
+                    direction=jny.get("dirTxt", ""),
+                    lat=pos["y"] / 1_000_000,
+                    lon=pos["x"] / 1_000_000,
+                    jid=jny.get("jid", ""),
+                )
+            )
+        return vehicles
+
+    def find_lines(self, query: str) -> list[Line]:
+        """Linien nach Label suchen (LineMatch).
+
+        Achtung: Der Datenbestand reicht über die KVB hinaus — "1" trifft
+        auch Linien aus VRR, Aachen und den Niederlanden. Die `line_id`
+        (`de:vrs:...` für Köln/Bonn) zeigt, wer gemeint ist.
+        """
+        res = self._call("LineMatch", {"input": query})
+        prod_l = res.get("common", {}).get("prodL", [])
+        return [_line_from_prod(prod_l[ln["prodX"]], ln.get("lineId", "")) for ln in res.get("lineL", []) if ln.get("prodX", -1) < len(prod_l)]
+
+    def line_details(self, line_id: str) -> Line:
+        """Details zu einer Linie (LineDetails), inkl. Pünktlichkeits-Statistik.
+
+        `line_id` im Format aus find_lines() ("de:vrs:18") — das reine Label
+        ("18") liefert FAIL.
+
+        Der `stats`-Block hat die richtigen Felder (`cnt` = Fahrten,
+        `cncl` = Ausfälle, `ont` = pünktlich, `delCntL` = Verspätungs-
+        Histogramm zu den Minuten-Grenzen in `delGrpL`), aber bei der KVB
+        ist außer `cnt` bisher alles 0 — offenbar nicht befüllt.
+        """
+        res = self._call("LineDetails", {"lineId": line_id})
+        prod_l = res.get("common", {}).get("prodL", [])
+        if not prod_l:
+            raise KVBHafasError(f"LineDetails returned no product for {line_id}")
+        return _line_from_prod(prod_l[0], line_id, res.get("common", {}).get("opL", []))
+
+    def find_journeys(self, query: str, date: str | None = None, time: str | None = None) -> list[ScheduledJourney]:
+        """Fahrten nach Linien-Label suchen (JourneyMatch).
+
+        Liefert den Fahrplan, keine Echtzeit — dafür `service_days` im
+        Klartext ("Mo - Fr; nicht 10. bis 28. Aug") und eine `jid` für
+        journey_details(). `date`/`time` sind serverseitig Pflicht und
+        werden sonst mit "jetzt" gefüllt.
+        """
+        now = datetime.now()
+        req: dict[str, Any] = {
+            "input": query,
+            # Beide Felder sind Pflicht — ohne date/time antwortet JourneyMatch mit FAIL.
+            "date": date or now.strftime("%Y%m%d"),
+            "time": time or now.strftime("%H%M%S"),
+        }
+        res = self._call("JourneyMatch", req)
+        common = res.get("common", {})
+        loc_l, prod_l = common.get("locL", []), common.get("prodL", [])
+
+        def loc_name(idx: int | None) -> str:
+            return loc_l[idx].get("name", "") if idx is not None and idx < len(loc_l) else ""
+
+        journeys = []
+        for jny in res.get("jnyL", []):
+            stop_l = jny.get("stopL", [])
+            first, last = (stop_l[0], stop_l[-1]) if stop_l else ({}, {})
+            prod_idx = jny.get("prodX")
+            s_days = jny.get("sDaysL") or [{}]
+            journeys.append(
+                ScheduledJourney(
+                    line=prod_l[prod_idx].get("name", "") if prod_idx is not None and prod_idx < len(prod_l) else "",
+                    from_name=loc_name(first.get("locX")),
+                    to_name=loc_name(last.get("locX")),
+                    dep_time=first.get("dTimeS", ""),
+                    arr_time=last.get("aTimeS", ""),
+                    jid=jny.get("jid", ""),
+                    service_days=s_days[0].get("sDaysI", ""),
+                )
+            )
+        return journeys
+
+    def journey_course(self, jid: str) -> list[tuple[float, float]]:
+        """Linienverlauf einer Fahrt als (lat, lon)-Punkte (JourneyCourse).
+
+        Standardmäßig ein Punkt pro Halt — genug, um die Fahrt auf einer
+        Karte zu zeichnen, aber keine straßengenaue Geometrie.
+        """
+        res = self._call("JourneyCourse", {"jid": jid})
+        poly_l = res.get("common", {}).get("polyL", [])
+        return _decode_polyline(poly_l[0].get("crdEncYX", "")) if poly_l else []
+
+    def alerts_in_area(
+        self, min_lat: float, min_lon: float, max_lat: float, max_lon: float
+    ) -> list[ServiceAlert]:
+        """Störungsmeldungen in einer Bounding-Box (HimGeoPos).
+
+        Der geografische Gegenentwurf zum fehlenden Haltestellen-Filter von
+        HimSearch. Nur Meldungen mit Geo-Bezug tauchen hier auf — die vielen
+        Meldungen, die ihre Haltestelle nur im Text nennen, fehlen. Für Köln
+        kam die Liste bisher leer zurück; service_alerts(stop=...) bleibt
+        der verlässlichere Weg.
+        """
+        res = self._call(
+            "HimGeoPos",
+            {
+                "rect": {
+                    "llCrd": {"x": round(min_lon * 1_000_000), "y": round(min_lat * 1_000_000)},
+                    "urCrd": {"x": round(max_lon * 1_000_000), "y": round(max_lat * 1_000_000)},
+                }
+            },
+        )
+        return [
+            ServiceAlert(
+                text=msg.get("text", "").strip(),
+                category=msg.get("cat", -1),
+                priority=msg.get("prio", -1),
+                valid_from=msg.get("sDate", ""),
+                valid_to=msg.get("eDate", ""),
+            )
+            for msg in res.get("msgL", [])
+        ]
+
+    def reconstruct(self, ctx_recon: str) -> list[Connection]:
+        """Eine früher gefundene Verbindung neu auflösen (Reconstruction).
+
+        `ctx_recon` stammt aus Connection.ctx_recon einer trip_search().
+        Nützlich, um eine gemerkte Verbindung später mit frischen
+        Echtzeitdaten abzufragen, ohne erneut zu suchen.
+        """
+        return self._parse_connections(self._call("Reconstruction", {"ctxRecon": ctx_recon}))
+
+    def walk_route(self, gis_ctx: str) -> WalkRoute:
+        """Straßengenauen Verlauf eines Fußweg-Abschnitts holen (GisRoute).
+
+        `gis_ctx` kommt aus Leg.gis_ctx eines Fußwegs einer trip_search().
+        Selbst gebaute Kontexte lehnt der Server ab (FAIL) — es geht nur mit
+        einem Token, das er vorher selbst ausgegeben hat. Damit ist das hier
+        kein freies A-nach-B-Routing, sondern die Lupe auf einen Fußweg,
+        den HAFAS ohnehin schon vorgeschlagen hat.
+        """
+        res = self._call("GisRoute", {"gisCtx": gis_ctx, "getPolyline": True})
+        con_l = res.get("conL", [])
+        if not con_l:
+            return WalkRoute(dist_m=0, duration="", points=[])
+        sec_l = con_l[0].get("secL", [{}])
+        gis = sec_l[0].get("gis", {})
+        poly_l = res.get("common", {}).get("polyL", [])
+        return WalkRoute(
+            dist_m=gis.get("dist", 0),
+            duration=con_l[0].get("dur", ""),
+            points=_decode_polyline(poly_l[0].get("crdEncYX", "")) if poly_l else [],
+        )
+
+    def trip_alternatives(self, ctx_recon: str) -> list[Connection]:
+        """Alternativen zu einer Verbindung suchen (SearchOnTrip).
+
+        `ctx_recon` kommt aus Connection.ctx_recon einer trip_search().
+        Anders als reconstruct() (genau dieselbe Verbindung, frische
+        Echtzeit) liefert das hier die Verbindung **plus spätere
+        Alternativen** auf derselben Relation — im Test 12 Stück.
+
+        `date`/`time` werden von dieser Methode akzeptiert, lassen den
+        Request serverseitig aber immer auf PARSE laufen; der Zeitbezug
+        steckt ohnehin im Kontext.
+        """
+        return self._parse_connections(self._call("SearchOnTrip", {"ctxRecon": ctx_recon}))

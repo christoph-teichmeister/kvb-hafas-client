@@ -355,8 +355,229 @@ def test_call_raises_on_envelope_level_error():
 
 def test_stop_lines_dedupes_and_sorts():
     client = KVBHafasClient()
-    with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)):
+    with patch.object(client.session, "post", return_value=_mock_response(LOCDETAILS_RESPONSE)):
         lines = client.stop_lines("900000002")
 
-    assert lines == tuple(sorted(set(lines), key=lambda name: (len(name), name)))
-    assert "?" not in lines
+    assert lines == ("1", "18", "146")
+
+
+LOCDETAILS_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "LocDetails",
+            "err": "OK",
+            "res": {
+                "common": {"prodL": [{"name": "1"}, {"name": "146"}, {"name": "18"}, {"name": "172"}]},
+                "locL": [
+                    {
+                        "name": "Köln Neumarkt",
+                        "extId": "900000002",
+                        "crd": {"x": 6948329, "y": 50935667},
+                        "pRefL": [0, 1, 2],
+                    }
+                ],
+            },
+        }
+    ]
+}
+
+LOCGEOREACH_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "LocGeoReach",
+            "err": "OK",
+            "res": {
+                "common": {
+                    "locL": [
+                        {"name": "Steig A", "extId": "300000201", "mMastLocX": 2},
+                        {"name": "Steig B", "extId": "300000202", "mMastLocX": 2},
+                        {"name": "Köln Poststr.", "extId": "900000003", "crd": {"x": 6950037, "y": 50931541}},
+                    ]
+                },
+                "posL": [
+                    {"locX": 0, "dur": 7, "chg": 1},
+                    {"locX": 1, "dur": 2, "chg": 0},
+                ],
+            },
+        }
+    ]
+}
+
+JOURNEYGEOPOS_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "JourneyGeoPos",
+            "err": "OK",
+            "res": {
+                "common": {"prodL": [{"name": "18"}]},
+                "jnyL": [
+                    {
+                        "prodX": 0,
+                        "dirTxt": "Thielenbruch",
+                        "pos": {"x": 6948068, "y": 50936296},
+                        "jid": "1|4809|1|1|16092026",
+                    },
+                    {"prodX": 0, "dirTxt": "ohne Position"},
+                ],
+            },
+        }
+    ]
+}
+
+LINEDETAILS_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "LineDetails",
+            "err": "OK",
+            "res": {
+                "common": {
+                    "opL": [{"name": "Kölner Verkehrs-Betriebe"}],
+                    "prodL": [
+                        {
+                            "name": "18",
+                            "oprX": 0,
+                            "prodCtx": {"catOut": "Str", "lineId": "de:vrs:18"},
+                            "stat": {"cnt": 1062, "cncl": 0},
+                        }
+                    ],
+                },
+                "line": {},
+            },
+        }
+    ]
+}
+
+JOURNEYCOURSE_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "JourneyCourse",
+            "err": "OK",
+            "res": {"common": {"polyL": [{"crdEncYX": "ccauH{hei@ulArrA", "delta": True}]}},
+        }
+    ]
+}
+
+SERVERINFO_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "ServerInfo",
+            "err": "OK",
+            "res": {"fpB": "20251214", "fpE": "20261212", "sD": "20260916", "sT": "095927"},
+        }
+    ]
+}
+
+
+def test_server_info_returns_timetable_period():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(SERVERINFO_RESPONSE)):
+        info = client.server_info()
+
+    assert (info.timetable_from, info.timetable_to) == ("20251214", "20261212")
+
+
+def test_stop_details_resolves_line_refs():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(LOCDETAILS_RESPONSE)):
+        stop = client.stop_details("900000002")
+
+    # pRefL verweist auf prodL — "172" ist nicht referenziert und darf fehlen.
+    assert stop.lines == ("1", "18", "146")
+    assert stop.lat == pytest.approx(50.935667)
+
+
+def test_reachable_stops_collapses_platforms_to_master():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(LOCGEOREACH_RESPONSE)):
+        reachable = client.reachable_stops("900000002", max_minutes=10)
+
+    assert len(reachable) == 1
+    assert reachable[0].stop.ext_id == "900000003"
+    assert reachable[0].minutes == 2  # schnellster Steig gewinnt
+
+
+def test_vehicle_positions_skips_entries_without_position():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(JOURNEYGEOPOS_RESPONSE)):
+        vehicles = client.vehicle_positions(50.83, 6.75, 51.05, 7.15)
+
+    assert len(vehicles) == 1
+    assert vehicles[0].line == "18"
+    assert (vehicles[0].lat, vehicles[0].lon) == (pytest.approx(50.936296), pytest.approx(6.948068))
+
+
+def test_line_details_reads_operator_and_stats():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(LINEDETAILS_RESPONSE)):
+        line = client.line_details("de:vrs:18")
+
+    assert line.category == "Str"
+    assert line.operator == "Kölner Verkehrs-Betriebe"
+    assert line.journeys == 1062
+
+
+def test_journey_course_decodes_polyline():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(JOURNEYCOURSE_RESPONSE)):
+        points = client.journey_course("1|4809|1|1|16092026")
+
+    assert points[0] == (pytest.approx(50.8013), pytest.approx(6.91358))
+    assert len(points) == 2
+
+
+GISROUTE_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "GisRoute",
+            "err": "OK",
+            "res": {
+                "common": {"polyL": [{"crdEncYX": "artuHogki@TaE", "delta": True}]},
+                "conL": [{"dur": "000200", "secL": [{"type": "WALK", "gis": {"dist": 148}}]}],
+            },
+        }
+    ]
+}
+
+
+def test_walk_route_reads_distance_and_polyline():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(GISROUTE_RESPONSE)):
+        route = client.walk_route("H|1|W$…")
+
+    assert route.dist_m == 148
+    assert route.duration == "000200"
+    assert len(route.points) == 2
+
+
+def test_trip_search_exposes_walk_gis_ctx():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(TRIPSEARCH_RESPONSE)):
+        connections = client.trip_search("900000002", "900000001")
+
+    walks = [leg for con in connections for leg in con.legs if leg.walk]
+    # Fahrt-Abschnitte dürfen keinen gis_ctx tragen, Fußwege schon (sofern HAFAS einen liefert).
+    rides = [leg for con in connections for leg in con.legs if not leg.walk]
+    assert all(leg.gis_ctx == "" for leg in rides)
+    assert walks
+
+
+def test_dedupe_connections_keeps_different_routes():
+    from main import dedupe_connections
+
+    from kvb_hafas import Connection, Leg
+
+    def con(line: str) -> Connection:
+        leg = Leg(walk=False, from_name="A", to_name="B", dep_time="102400", arr_time="105400", line=line)
+        return Connection(dep_time="102400", arr_time="105400", num_changes=0, legs=[leg])
+
+    # Gleiche Eckzeiten, aber andere Linie -> keine Dublette.
+    result = dedupe_connections([con("16"), con("16"), con("18")])
+    assert [c.legs[0].line for c in result] == ["16", "18"]
+
+
+def test_dur_min_formats_hafas_duration():
+    from main import dur_min
+
+    assert dur_min("000200") == "2 min"
+    assert dur_min("011500") == "75 min"
+    assert dur_min("") == "—"
