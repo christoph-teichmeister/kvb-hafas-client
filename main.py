@@ -245,16 +245,17 @@ def show_nearby(client: KVBHafasClient) -> None:
         console.print("[red]Ungültige Koordinaten.[/]")
         return
     with console.status("[cyan]Suche Haltestellen…"):
-        stops = client.nearby_stops(lat, lon, max_dist_m=dist)
+        stops = client.nearby_stops(lat, lon, max_dist_m=dist, with_lines=True)
     title = f"In {dist} m Umkreis"
     if not stops:
         console.print(panel(title, "[dim]nichts gefunden[/]"))
         return
     table = Table(box=box.SIMPLE, show_header=False)
     table.add_column("Haltestelle")
+    table.add_column("Linien", style="cyan")
     table.add_column("ID", style="dim")
     for stop in stops:
-        table.add_row(esc(stop.name), stop.ext_id)
+        table.add_row(esc(stop.name), esc(" · ".join(stop.lines)) or "[dim]—[/]", stop.ext_id)
     console.print(panel(title, table))
 
 
