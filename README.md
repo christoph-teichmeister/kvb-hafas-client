@@ -76,17 +76,17 @@ uv run example.py Neumarkt
 
 ## Was funktioniert
 
-| Feature | Status |
-|---|---|
-| Haltestellensuche (`find_stops`) | ✅ |
-| Umkreissuche (`nearby_stops`) | ✅ liefert aber auch POIs, kein reiner Stop-Filter |
-| Echtzeit-Abfahrten (`station_board`) | ✅ inkl. Soll/Ist-Zeiten |
-| Fahrtausfälle (`isCncl`-Flag) | ✅ vorhanden, noch nicht gegen echten Ausfall verifiziert |
-| Zwischenhalte einer Fahrt (`journey_details`) | ✅ |
-| Verbindungssuche (`trip_search`) | ✅ |
-| Störungsmeldungen (`service_alerts`) | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — **kein Filter nach Haltestelle/Linie**, du musst client-seitig filtern (und die eingestreute KVB-Werbung, `category == 99`, selbst rausfiltern) |
-| Historische Ist-Daten (Verspätungen/Ausfälle rückblickend) | ❌ nicht verfügbar, nur der Fahrplan der aktuellen Periode — siehe [docs/API.md](docs/API.md#historische-daten) |
-| Auslastungsdaten | ❌ nicht gefunden, vermutlich von KVB nicht befüllt |
+| Feature                                                    | Status                                                                                                                                                                                          |
+|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Haltestellensuche (`find_stops`)                           | ✅                                                                                                                                                                                              |
+| Umkreissuche (`nearby_stops`)                              | ✅ liefert aber auch POIs, kein reiner Stop-Filter                                                                                                                                              |
+| Echtzeit-Abfahrten (`station_board`)                       | ✅ inkl. Soll/Ist-Zeiten                                                                                                                                                                        |
+| Fahrtausfälle (`isCncl`-Flag)                              | ✅ vorhanden, noch nicht gegen echten Ausfall verifiziert                                                                                                                                       |
+| Zwischenhalte einer Fahrt (`journey_details`)              | ✅                                                                                                                                                                                              |
+| Verbindungssuche (`trip_search`)                           | ✅                                                                                                                                                                                              |
+| Störungsmeldungen (`service_alerts`)                       | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — **kein Filter nach Haltestelle/Linie**, du musst client-seitig filtern (und die eingestreute KVB-Werbung, `category == 99`, selbst rausfiltern) |
+| Historische Ist-Daten (Verspätungen/Ausfälle rückblickend) | ❌ nicht verfügbar, nur der Fahrplan der aktuellen Periode — siehe [docs/API.md](docs/API.md#historische-daten)                                                                                 |
+| Auslastungsdaten                                           | ❌ nicht gefunden, vermutlich von KVB nicht befüllt                                                                                                                                             |
 
 **Vollständige API-Referenz mit allen Feldern, Beispiel-Requests und
 Fehlercodes:** [docs/API.md](docs/API.md)
