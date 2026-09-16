@@ -9,6 +9,7 @@ Beispielen), nicht auf offizieller KVB-Dokumentation — es gibt keine.
 
 - [Grundlagen](#grundlagen)
 - [Auth](#auth)
+- [Haltestellen-IDs](#haltestellen-ids)
 - [Methoden](#methoden)
     - [LocMatch — Haltestellen suchen](#locmatch--haltestellen-suchen)
     - [LocGeoPos — Haltestellen in der Nähe](#locgeopos--haltestellen-in-der-nähe)
@@ -20,6 +21,8 @@ Beispielen), nicht auf offizieller KVB-Dokumentation — es gibt keine.
     - [GisRoute — Fußweg straßengenau](#gisroute--fußweg-straßengenau)
     - [HimSearch — Störungsmeldungen](#himsearch--störungsmeldungen)
     - [HimGeoPos — Störungen im Kartenausschnitt](#himgeopos--störungen-im-kartenausschnitt)
+    - [HimMatch — aktuell betroffene Haltestellen](#himmatch--aktuell-betroffene-haltestellen)
+    - [LineGeoPos — Linien im Umkreis](#linegeopos--linien-im-umkreis)
     - [ServerInfo — Fahrplanperiode](#serverinfo--fahrplanperiode)
     - [LocDetails — Haltestelle im Detail](#locdetails--haltestelle-im-detail)
     - [LocGeoReach — Isochrone](#locgeoreach--isochrone)
@@ -88,6 +91,37 @@ Haltestellen auf einmal abfragen willst.
 Kein Checksum/Salt-Mechanismus nötig (manche HAFAS-Installationen verlangen
 das zusätzlich als `mac`-Feld — KVB offenbar nicht). Die `aid` ist Teil des
 öffentlich ausgelieferten Frontend-JS, keine geheime Anmeldeinformation.
+
+## Haltestellen-IDs
+
+Drei ID-Formen tauchen in den Antworten auf, und sie hängen zusammen:
+
+| Form        | Beispiel    | Bedeutung                                                                 |
+|-------------|-------------|---------------------------------------------------------------------------|
+| `900xxxxxx` | `900000178` | **Master-Haltestelle** — das, was `find_stops()` liefert und jede Methode als `extId` erwartet |
+| `300xxxxxx` | `300000201` | **Steig/Mast** — ein einzelner Bahnsteig der Haltestelle. Taucht in `common.locL`, in `LocGeoReach`-Ergebnissen und in HIM-Loc-Referenzen auf. Über `mMastLocX` kommt man zum Master zurück |
+| `1`–`949`   | `178`       | **KVB-interne Haltestellennummer**, wie sie die Publikums-Website in ihren URLs nutzt |
+
+Die dritte hängt an der ersten über eine simple Addition:
+
+```
+extId = 900000000 + kvb_nummer
+```
+
+Verifiziert an 8 Stichproben (8/8), z.B. `178` → `900000178` →
+"Köln Braunsfeld Aachener Str./Gürtel".
+
+Der praktische Wert: Die KVB-Website führt unter
+`https://www.kvb.koeln/haltestellen/overview/` eine vollständige Liste
+**genau der KVB-Haltestellen** (aktuell 949). HAFAS kann das nicht — `LocMatch`
+braucht einen Suchbegriff, `LocGeoPos` Koordinaten plus Radius, und beide
+liefern auch VRS-, VRR- und NL-Haltestellen mit. Wer die Verbundgrenze sauber
+ziehen will, kann sich diese Liste einmalig extern besorgen und per Formel in
+`extId`s umrechnen.
+
+Dieser Client macht das **bewusst nicht** — er spricht ausschließlich den
+HAFAS-Endpoint, kein HTML-Scraping. Die Formel steht hier als Wissen, nicht
+als Implementierungsauftrag.
 
 ## Methoden
 
@@ -380,6 +414,53 @@ TXT, OPR, LINE, SENDER, GLINEID, PROD, AFLD, HIMTXT, LINEID, STATION, CAT,
 ADMIN, META, CH, UIC, REG` — welche davon tatsächlich ohne Parse-Fehler
 funktionieren, ist noch nicht systematisch durchgetestet.
 
+Weitere akzeptierte `HimSearch`-Felder (per Einzeltest ermittelt): `maxNum`
+(Limit), `dateB`/`dateE` und `timeB`/`timeE` (Gültigkeitsfenster),
+`onlyToday`, `onlyHimId`. `sortL` und `getPolyline` sind gültige Namen,
+lassen den Request aber auf `PARSE` laufen. Zum Thema Zeitfenster siehe
+[Historische Daten](#historische-daten) — rückwärts geht damit nichts.
+
+### HimMatch — aktuell betroffene Haltestellen
+
+**Nimmt kein einziges Feld an** — jeder getestete Parameter (`himFltrL`,
+`input`, `maxNum`, `date`, `locL`, …) endet in `HAMM`.
+
+```json
+{"meth": "HimMatch", "req": {}}
+```
+
+**Response**: `res.affStL[]` — die Haltestellen, an denen gerade eine Störung
+anliegt, als Steig-Einträge (`extId` `300xxxxxx`), ohne Koordinaten
+(`crd` ist `{x: 0, y: 0}`) und mit Dubletten pro Steig. Klein und knackig:
+im Test 1-3 Haltestellen, während `HimSearch` 86 Meldungen listete. Das ist
+die Antwort auf "wo klemmt es gerade", nicht auf "welche Meldungen gibt es".
+
+### LineGeoPos — Linien im Umkreis
+
+```json
+{
+  "meth": "LineGeoPos",
+  "req": {
+    "ring": {"cCrd": {"x": 6948329, "y": 50935667}, "maxDist": 300}
+  }
+}
+```
+
+`ring` **oder** `rect`, beides funktioniert. `date`/`time`/`jnyFltrL` werden
+angenommen, lösen aber `PARAMETER` aus; `maxLoc`, `maxLine`, `getPolyline`,
+`onlyRT` → `HAMM`.
+
+**Response** (`res.lineL[]`): `{lineId, prodX, locX, jnyL}` — pro Linie ein
+Eintrag plus Beispielfahrten mit `stopL`.
+
+Zwei Eigenheiten:
+
+- **Deckel bei 50 Linien** pro Anfrage, unabhängig von der Rechteckgröße.
+  Für ein ganzes Netz müsste man kacheln.
+- **Vollständiger als `LocDetails.pRefL`**: Am Neumarkt liefert `pRefL`
+  9 Linien, `LineGeoPos` im 300-m-Ring 14 — die Nachtlinien (`101`, `107`,
+  `109`, `172`, `173`) fehlen in `pRefL`.
+
 ### HimGeoPos — Störungen im Kartenausschnitt
 
 Der geografische Gegenentwurf zum fehlenden Haltestellen-Filter von
@@ -607,8 +688,8 @@ damit lässt sich sauber trennen, was existiert.
 **Vorhanden und genutzt:** `LocMatch`, `LocGeoPos`, `LocDetails`,
 `LocGeoReach`, `StationBoard`, `JourneyDetails`, `JourneyMatch`,
 `JourneyGeoPos`, `JourneyCourse`, `TripSearch`, `Reconstruction`,
-`SearchOnTrip`, `GisRoute`, `HimSearch`, `HimGeoPos`, `LineMatch`,
-`LineDetails`, `ServerInfo`.
+`SearchOnTrip`, `GisRoute`, `HimSearch`, `HimGeoPos`, `HimMatch`,
+`LineMatch`, `LineDetails`, `LineGeoPos`, `ServerInfo`.
 
 **Rezept zum Schema-Knacken:** Da `HAMM` nicht sagt, *welches* Feld schuld
 ist, hilft nur das Gegenteil von „alles auf einmal“: pro Request **genau ein
@@ -622,9 +703,17 @@ Weg fielen `GisRoute` (`gisCtx`) und `SearchOnTrip` (`ctxRecon`).
 | Methode      | Stand                                                                                      |
 |--------------|---------------------------------------------------------------------------------------------|
 | `JourneyTree` | Leerer `req` → `OK` mit leerem `jnyTreeNodeL`; jede Parameter-Variante → `HAMM`.            |
+| `TariffSearch` | Existiert (leerer `req` → `TARIFF`), nimmt aber **kein einziges Feld** an — `ctxRecon`, `conL`, `depLocL`, `ovwTrfRefL` und alles andere → `HAMM`. Damit kein Weg, ihr eine Verbindung zu übergeben. Die einzige Preis-Methode der API, und sie ist unerreichbar. |
 | `Subscr*`    | `SubscrCreate`, `SubscrSearch`, `SubscrDetails`, `SubscrUserCreate` antworten mit `ERROR` statt `HAMM` — existieren also, brauchen aber vermutlich einen registrierten Nutzer (Push-Abos). |
 
-**Nicht vorhanden** (alle `HAMM`): `StationBoardTree`, `TimetableInfo`,
+Zweite Runde mit 58 weiteren Namen (Listen-, Archiv- und Statistik-Kandidaten)
+brachte genau drei Treffer: `HimMatch`, `LineGeoPos`, `TariffSearch`.
+
+**Nicht vorhanden** (alle `HAMM`): `StopList`, `StationList`, `LocList`,
+`LineList`, `ArchiveSearch`, `HistorySearch`, `JourneyArchive`, `IstDaten`,
+`StatisticsSearch`, `Punctuality`, `DelaySearch`, `JourneyStatus`,
+`NetworkInfo`, `ScheduleInfo`, `CalendarInfo`, `VehicleGeoPos`, `MapLayers`,
+`UserInfo`, `Ping`, `StationBoardTree`, `TimetableInfo`,
 `PoiSearch`, `Themes`, `NearbySearch`, `Geometry`, `FareSearch`, `Ticket`,
 `PriceSearch`, `BestPrice`, `LocData`, `GisLocation`, `MatchSvc`,
 `Departure`, `Arrival`, `Kaleidoscope`, `SubscrChannelList`, `AttrSearch`,
@@ -636,7 +725,34 @@ Preise macht.
 
 ## Historische Daten
 
-**Kurzfassung: Nein, nicht wirklich.**
+**Kurzfassung: Nein. Kein Weg, auf keiner Methode.**
+
+Zwei Anläufe, beide negativ:
+
+**1. Störungsmeldungen rückwärts.** `HimSearch` akzeptiert `dateB`/`dateE`,
+und die Filter wirken auch (verschiedene Fenster → verschiedene Trefferzahlen).
+Trotzdem ist keine Historie drin: in **keinem** getesteten Fenster kam eine
+einzige bereits abgelaufene Meldung zurück.
+
+| Abfrage (am 2026-09-16)        | Meldungen | davon abgelaufen |
+|--------------------------------|-----------|------------------|
+| ohne Filter                    | 86        | **0**            |
+| `dateB/dateE` = Dez 2025       | 22        | **0**            |
+| `dateB/dateE` = Jan 2026       | 23        | **0**            |
+| `dateB/dateE` = 2024           | 19        | **0**            |
+
+Der HIM-Speicher hält nur gültige und künftige Meldungen; was abläuft, wird
+gelöscht. Die Datumsfelder filtern innerhalb dieses lebenden Bestands, nicht
+in einem Archiv. (Auffällig: das 2024-Fenster liefert Meldungen mit `sDate`
+in 2026 — der Filter greift bei weit zurückliegenden Zeiträumen ohnehin nicht
+sinnvoll.)
+
+**2. Archiv-Methoden.** `ArchiveSearch`, `HistorySearch`, `JourneyArchive`,
+`IstDaten`, `StatisticsSearch`, `Punctuality`, `DelaySearch` — alle `HAMM`,
+existieren nicht. Die einzige aggregierte Kennzahl wäre der `stat`-Block von
+[`LineDetails`](#linematch--linedetails--linien), und den füllt die KVB nicht.
+
+**Zum Fahrplan der Vergangenheit:**
 
 - `StationBoard` akzeptiert ein `date`-Feld auch für die Vergangenheit —
   aber nur innerhalb der **aktuellen Fahrplanperiode**. Getestet:
@@ -682,6 +798,19 @@ nicht durchprobiert haben.
 | `HAMM`  | Unbekannte Methode **oder** unbekanntes/falsch typisiertes Feld im `req` — nützlich zur Methoden-Erkennung, siehe [Methoden-Inventar](#methoden-inventar) |
 | `NULLPTR`, `PARAMETER`, `LOCATION`, `DATE_TIME`, `DEPARTURE` | Methode existiert, Pflichtparameter fehlt — im Umkehrschluss der Beweis, dass es sie gibt |
 | `FAIL`  | Generischer Fehler (in Tests nur gemockt, nicht live gesehen)                              |
+
+## Andere Pfade auf dem Host
+
+`auskunft.kvb.koeln` ist ein reiner mgate-Host. Geprüft und alle `404`:
+`/bin/mgate.exe`, `/bin/query.exe/dn`, `/restproxy`, `/hafas-proxy`,
+`/gis/gate`, `/mgate.exe`, `/version.json`, `/api/`, `/rest/`,
+`/hafasRESTful/`, `/gtfs/`, `/opendata/`, `/tiles/`. `/gate/` antwortet mit
+`400`. Es gibt genau einen Endpoint.
+
+Die Config unter `/config/webapp.config.json` ist vollständig ausgelesen und
+enthält außer `urlMgate` und der `aid` keine weiteren Service-URLs — nur
+HaCon-Cookie-Links und einen leeren Maps-API-Key. Build-Datum:
+29. August 2022.
 
 ## Wie das gefunden wurde
 

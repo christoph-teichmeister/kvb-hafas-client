@@ -581,3 +581,210 @@ def test_dur_min_formats_hafas_duration():
     assert dur_min("000200") == "2 min"
     assert dur_min("011500") == "75 min"
     assert dur_min("") == "—"
+
+
+JOURNEYDETAILS_ROUTE_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "JourneyDetails",
+            "err": "OK",
+            "res": {
+                "common": {
+                    "prodL": [{"name": "5"}],
+                    "locL": [
+                        {
+                            "name": "Köln Ossendorf Sparkasse am Butzweilerhof",
+                            "extId": "300090301",
+                            "crd": {"x": 6888659, "y": 50984586},
+                        },
+                        {"name": "Köln Heumarkt", "extId": "300000151", "crd": {"x": 6957453, "y": 50935110}},
+                    ],
+                },
+                "journey": {
+                    "jid": "1|9526|16|1|17092026",
+                    "prodX": 0,
+                    "dirTxt": "Heumarkt",
+                    "date": "20260917",
+                    "sDaysL": [{"sDaysI": "16. bis 30. Sep 2026 Mo - Fr", "sDaysB": "00FF"}],
+                    "stopL": [
+                        {"idx": 0, "locX": 0, "dTimeS": "082900"},
+                        {"idx": 1, "locX": 1, "aTimeS": "085600"},
+                    ],
+                },
+            },
+        }
+    ]
+}
+
+
+def test_station_board_passes_date_time_and_type():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)) as post:
+        client.station_board("900000002", max_journeys=500, date="20260917", time="040000", board_type="ARR")
+
+    req = post.call_args.kwargs["json"]["svcReqL"][0]["req"]
+    assert req["date"] == "20260917"
+    assert req["time"] == "040000"
+    assert req["type"] == "ARR"
+    assert req["maxJny"] == 500
+
+
+def test_station_board_omits_date_time_when_not_given():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)) as post:
+        client.station_board("900000002")
+
+    req = post.call_args.kwargs["json"]["svcReqL"][0]["req"]
+    assert "date" not in req and "time" not in req
+    assert req["type"] == "DEP"
+
+
+def test_station_board_reads_arrival_times_on_arr_board():
+    """Auf einer ARR-Tafel steht die Zeit in aTimeS, nicht in dTimeS."""
+    arr = {
+        "svcResL": [
+            {
+                "meth": "StationBoard",
+                "err": "OK",
+                "res": {
+                    "common": {"prodL": [{"name": "5"}]},
+                    "jnyL": [
+                        {
+                            "stbStop": {"aTimeS": "071500", "aTimeR": "071800"},
+                            "prodX": 0,
+                            "dirTxt": "Heumarkt",
+                            "jid": "1|9537|0|1|17092026",
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(arr)):
+        deps = client.station_board("900000903", board_type="ARR")
+
+    assert deps[0].planned == "071500"
+    assert deps[0].realtime == "071800"
+
+
+def test_journey_route_resolves_stops_and_service_days():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(JOURNEYDETAILS_ROUTE_RESPONSE)):
+        route = client.journey_route("1|9526|16|1|17092026")
+
+    assert route.line == "5"
+    assert route.direction == "Heumarkt"
+    assert route.date == "20260917"
+    assert route.service_days == "16. bis 30. Sep 2026 Mo - Fr"
+    assert route.service_bits == "00FF"
+    assert [s.stop.ext_id for s in route.stops] == ["300090301", "300000151"]
+    assert route.stops[0].stop.name == "Köln Ossendorf Sparkasse am Butzweilerhof"
+    assert route.stops[0].stop.lat == pytest.approx(50.984586)
+    assert route.stops[0].dep_planned == "082900"
+    assert route.stops[0].arr_planned is None
+    assert route.stops[1].arr_planned == "085600"
+
+
+def test_min_interval_throttles_calls(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("kvb_hafas.client.time.sleep", sleeps.append)
+    client = KVBHafasClient(min_interval=1.0)
+    with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)):
+        client.station_board("900000002")
+        client.station_board("900000002")
+
+    assert len(sleeps) == 1 and 0 < sleeps[0] <= 1.0
+
+
+def test_no_throttle_by_default(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("kvb_hafas.client.time.sleep", sleeps.append)
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)):
+        client.station_board("900000002")
+        client.station_board("900000002")
+
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "mast,expected",
+    [
+        ("300090301", "900000903"),  # Sparkasse am Butzweilerhof
+        ("300000151", "900000001"),  # Heumarkt, Steig 51
+        ("300097601", "900000976"),  # Ikea am Butzweilerhof
+        ("300023901", "900000239"),
+        ("900000903", None),  # Master-ID bleibt unangetastet
+        ("30009030", None),  # zu kurz
+        ("3000903A1", None),  # nicht numerisch
+        ("", None),
+    ],
+)
+def test_station_ext_id(mast, expected):
+    from kvb_hafas import station_ext_id
+
+    assert station_ext_id(mast) == expected
+
+
+def test_journey_route_sets_station_ext_id():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(JOURNEYDETAILS_ROUTE_RESPONSE)):
+        route = client.journey_route("1|9526|16|1|17092026")
+
+    assert [s.station_ext_id for s in route.stops] == ["900000903", "900000001"]
+
+
+HIMMATCH_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "HimMatch",
+            "err": "OK",
+            "res": {
+                "common": {},
+                "affStL": [
+                    {"name": "Köln Ubierring", "extId": "300001701", "crd": {"x": 0, "y": 0}},
+                    {"name": "Köln Ubierring", "extId": "300001701", "crd": {"x": 0, "y": 0}},
+                    {"name": "Köln Dellbrück", "extId": "300059504", "crd": {"x": 7060000, "y": 50970000}},
+                ],
+            },
+        }
+    ]
+}
+
+LINEGEOPOS_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "LineGeoPos",
+            "err": "OK",
+            "res": {
+                "common": {"prodL": [{"name": "18", "prodCtx": {"catOut": "Str"}}, {"name": "146"}]},
+                "lineL": [
+                    {"lineId": "de:vrs:18", "prodX": 0},
+                    {"lineId": "de:vrs:18", "prodX": 0},
+                    {"lineId": "de:vrs:146", "prodX": 1},
+                ],
+            },
+        }
+    ]
+}
+
+
+def test_affected_stops_dedupes_and_drops_null_coords():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(HIMMATCH_RESPONSE)):
+        stops = client.affected_stops()
+
+    assert [s.ext_id for s in stops] == ["300001701", "300059504"]
+    # crd 0/0 ist "keine Koordinate", nicht Position null/null im Atlantik.
+    assert stops[0].lat is None
+    assert stops[1].lat == pytest.approx(50.97)
+
+
+def test_lines_in_area_dedupes_by_line_id():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(LINEGEOPOS_RESPONSE)):
+        lines = client.lines_in_area(50.935667, 6.948329)
+
+    assert [line.name for line in lines] == ["18", "146"]
+    assert lines[0].category == "Str"

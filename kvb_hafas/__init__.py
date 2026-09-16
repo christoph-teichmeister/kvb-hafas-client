@@ -2,6 +2,8 @@ from .client import (
     Connection,
     Departure,
     KVBHafasClient,
+    JourneyRoute,
+    JourneyStop,
     KVBHafasError,
     Leg,
     Line,
@@ -10,6 +12,7 @@ from .client import (
     ServerInfo,
     ServiceAlert,
     Stop,
+    station_ext_id,
     Vehicle,
     WalkRoute,
 )
@@ -18,6 +21,8 @@ __all__ = [
     "KVBHafasClient",
     "Stop",
     "Departure",
+    "JourneyRoute",
+    "JourneyStop",
     "ServiceAlert",
     "Connection",
     "Leg",
@@ -28,4 +33,5 @@ __all__ = [
     "Vehicle",
     "WalkRoute",
     "KVBHafasError",
+    "station_ext_id",
 ]

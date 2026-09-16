@@ -12,6 +12,7 @@ verwenden.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -134,6 +135,33 @@ class Reachable:
 
 
 @dataclass
+class JourneyStop:
+    """Ein Halt im Laufweg einer Fahrt (JourneyDetails)."""
+
+    idx: int  # Position im Laufweg, 0 = Startpunkt
+    stop: Stop  # ext_id ist die Mast-ID (300xxxxxNN), nicht die Haltestellen-ID
+    arr_planned: str | None  # HAFAS-Zeitstring, ggf. mit Tagesübertrags-Präfix
+    dep_planned: str | None
+    arr_realtime: str | None = None
+    dep_realtime: str | None = None
+    cancelled: bool = False
+    station_ext_id: str | None = None  # Master-Haltestelle, beide Richtungen gemeinsam
+
+
+@dataclass
+class JourneyRoute:
+    """Kompletter Laufweg einer Fahrt, Halte bereits aufgelöst."""
+
+    jid: str
+    line: str
+    direction: str
+    date: str  # YYYYMMDD, Betriebstag der Fahrt
+    service_days: str  # sDaysI, Klartext ("16. bis 30. Sep 2026 Mo - Fr")
+    service_bits: str  # sDaysB, Bitmaske ab fpB (siehe server_info())
+    stops: list[JourneyStop] = field(default_factory=list)
+
+
+@dataclass
 class ScheduledJourney:
     """Eine Fahrt aus dem Fahrplan (JourneyMatch) — ohne Echtzeit."""
 
@@ -191,6 +219,31 @@ def _decode_polyline(encoded: str) -> list[tuple[float, float]]:
     return points
 
 
+def station_ext_id(mast_ext_id: str) -> str | None:
+    """Mast-ID (`300xxxxxNN`) -> Haltestellen-ID (`900xxxxxx`).
+
+    JourneyDetails referenziert Halte richtungsscharf über Mast-IDs, während
+    find_stops() und alle anderen Methoden die Master-Haltestelle erwarten.
+    Beide hängen über die KVB-Haltestellennummer zusammen:
+
+        Mast  = "300" + nummer(4-stellig) + steig(2-stellig)
+        Halt  = 900000000 + nummer
+
+    z.B. `300090301` -> `900000903` (Sparkasse am Butzweilerhof).
+
+    Gibt `None` für alles, was nicht wie eine Mast-ID aussieht — unter anderem
+    für Master-IDs selbst, die also nicht versehentlich umgerechnet werden.
+
+    ponytail: Heuristik auf dem ID-Schema, kein dokumentiertes Feld. HAFAS
+    liefert hier kein `mMastLocX`, mit dem man es sauber auflösen könnte.
+    Verifiziert an den 34 Masten der Linie 5 (34/34). Bricht, wenn KVB die
+    Mast-IDs umstellt.
+    """
+    if len(mast_ext_id) != 9 or not mast_ext_id.startswith("300") or not mast_ext_id.isdigit():
+        return None
+    return str(900_000_000 + int(mast_ext_id[3:7]))
+
+
 def _mast_steig(loc_l: list[dict[str, Any]], loc_x: int | None) -> str | None:
     """Steig aus der Mast-extId ableiten, wenn HAFAS kein dPlatf liefert.
 
@@ -219,16 +272,32 @@ class KVBHafasClient:
         deps = client.station_board(stops[0].ext_id)
     """
 
-    def __init__(self, session: requests.Session | None = None, timeout: float = 10.0):
+    def __init__(
+        self,
+        session: requests.Session | None = None,
+        timeout: float = 10.0,
+        min_interval: float = 0.0,
+    ):
+        """`min_interval` erzwingt einen Mindestabstand (Sekunden) zwischen zwei
+        Requests. Default 0 = aus, damit interaktive Nutzung nicht ausgebremst
+        wird; Batch-Jobs (siehe fetch_timetable.py) setzen es auf >= 1.0, um die
+        Rate-Limit-Zusage aus dem README einzuhalten."""
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.min_interval = min_interval
         self._req_counter = 0
+        self._last_call = 0.0
 
     def _next_id(self) -> str:
         self._req_counter += 1
         return f"{self._req_counter}@"
 
     def _call(self, meth: str, req: dict[str, Any]) -> dict[str, Any]:
+        if self.min_interval:
+            wait = self._last_call + self.min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
         payload = {
             "id": self._next_id(),
             "ver": "1.16",
@@ -331,27 +400,102 @@ class KVBHafasClient:
     def journey_details(self, jid: str) -> dict[str, Any]:
         """Fetch full stop-by-stop details for a single journey.
 
-        `jid` comes from a Departure/journey object's "jid" field (not
-        currently exposed on the Departure dataclass — extend station_board
-        if you need it, or call _call("StationBoard", ...) directly and
-        read jny["jid"]).
+        `jid` comes from `Departure.jid`.
 
         Returns the raw `journey` dict (includes `stopL`: every stop with
-        planned/realtime arrival+departure times and platform info).
+        planned/realtime arrival+departure times and platform info). Die
+        Halte darin referenzieren Orte nur per `locX`-Index — zum Auflösen
+        siehe journey_route().
         """
         res = self._call("JourneyDetails", {"jid": jid})
         return res.get("journey", {})
 
-    def station_board(self, stop_ext_id: str, max_journeys: int = 10) -> list[Departure]:
-        """Fetch the live departure board for a stop (by extId, see find_stops)."""
-        res = self._call(
-            "StationBoard",
-            {
-                "type": "DEP",
-                "stbLoc": {"extId": stop_ext_id},
-                "maxJny": max_journeys,
-            },
+    def journey_route(self, jid: str) -> JourneyRoute:
+        """Kompletter Laufweg einer Fahrt mit aufgelösten Haltestellen.
+
+        Im Gegensatz zu journey_details() wird hier `common.locL`
+        mitausgewertet — ohne das sind die `locX`-Indizes der Halte
+        wertlos. Liefert außerdem die Verkehrstage (`sDaysL`), die sonst nur
+        JourneyMatch herausgibt.
+
+        Achtung: die `ext_id` eines Halts ist eine **Mast-ID** (9-stellig,
+        `300xxxxxNN`), nicht die Haltestellen-ID aus find_stops()
+        (`900xxxxxx`) — pro Richtung/Bahnsteig eine eigene. Zum Zusammenfassen
+        beider Richtungen steht die Master-ID in `JourneyStop.station_ext_id`
+        (siehe station_ext_id()).
+        """
+        res = self._call("JourneyDetails", {"jid": jid})
+        jny = res.get("journey", {})
+        loc_l = res.get("common", {}).get("locL", [])
+        prod_l = res.get("common", {}).get("prodL", [])
+        prod_idx = jny.get("prodX")
+        s_days = (jny.get("sDaysL") or [{}])[0]
+
+        stops = []
+        for st in jny.get("stopL", []):
+            loc = loc_l[st["locX"]] if st.get("locX") is not None and st["locX"] < len(loc_l) else {}
+            crd = loc.get("crd", {})
+            stops.append(
+                JourneyStop(
+                    idx=st.get("idx", 0),
+                    stop=Stop(
+                        name=loc.get("name", ""),
+                        ext_id=loc.get("extId", ""),
+                        lat=crd.get("y", 0) / 1_000_000 if crd.get("y") is not None else None,
+                        lon=crd.get("x", 0) / 1_000_000 if crd.get("x") is not None else None,
+                    ),
+                    arr_planned=st.get("aTimeS"),
+                    dep_planned=st.get("dTimeS"),
+                    arr_realtime=st.get("aTimeR"),
+                    dep_realtime=st.get("dTimeR"),
+                    cancelled=bool(st.get("aCncl") or st.get("dCncl")),
+                    station_ext_id=station_ext_id(loc.get("extId", "")),
+                )
+            )
+
+        return JourneyRoute(
+            jid=jny.get("jid", jid),
+            line=prod_l[prod_idx].get("name", "") if prod_idx is not None and prod_idx < len(prod_l) else "",
+            direction=jny.get("dirTxt", ""),
+            date=jny.get("date", ""),
+            service_days=s_days.get("sDaysI", ""),
+            service_bits=s_days.get("sDaysB", ""),
+            stops=stops,
         )
+
+    def station_board(
+        self,
+        stop_ext_id: str,
+        max_journeys: int = 10,
+        date: str | None = None,
+        time: str | None = None,
+        board_type: str = "DEP",
+    ) -> list[Departure]:
+        """Fetch the departure board for a stop (by extId, see find_stops).
+
+        Ohne `date`/`time` (Format `YYYYMMDD` / `HHMMSS`) gilt "jetzt" und die
+        Antwort trägt Echtzeitwerte. Mit einem Datum lässt sich der Fahrplan
+        innerhalb der Fahrplanperiode (siehe server_info()) abfragen — dann
+        liefert HAFAS allerdings nur Soll-Zeiten, `realtime` bleibt leer.
+
+        `board_type` ist `"DEP"` (Abfahrten) oder `"ARR"` (Ankünfte). An einer
+        Endhaltestelle deckt DEP die eine, ARR die andere Fahrtrichtung ab.
+
+        `max_journeys` wird serverseitig durch die Dichte der Haltestelle
+        gedeckelt: an einem ruhigen Halt reicht ein Request für den ganzen
+        Tag, an einem Knoten wie Heumarkt bricht die Liste vorzeitig ab —
+        dort muss über `time` weitergeblättert werden.
+        """
+        req: dict[str, Any] = {
+            "type": board_type,
+            "stbLoc": {"extId": stop_ext_id},
+            "maxJny": max_journeys,
+        }
+        if date:
+            req["date"] = date
+        if time:
+            req["time"] = time
+        res = self._call("StationBoard", req)
         prod_l = res.get("common", {}).get("prodL", [])
         loc_l = res.get("common", {}).get("locL", [])
         departures = []
@@ -363,8 +507,8 @@ class KVBHafasClient:
                 Departure(
                     line=line,
                     direction=jny.get("dirTxt", ""),
-                    planned=stb.get("dTimeS", ""),
-                    realtime=stb.get("dTimeR"),
+                    planned=stb.get("dTimeS") or stb.get("aTimeS", ""),
+                    realtime=stb.get("dTimeR") or stb.get("aTimeR"),
                     platform=stb.get("dPlatfR") or stb.get("dPlatfS") or _mast_steig(loc_l, stb.get("locX")),
                     cancelled=bool(jny.get("isCncl", False)),
                     jid=jny.get("jid", ""),
@@ -372,7 +516,14 @@ class KVBHafasClient:
             )
         return departures
 
-    def service_alerts(self, stop: Stop | None = None, line: str | None = None) -> list[ServiceAlert]:
+    def service_alerts(
+        self,
+        stop: Stop | None = None,
+        line: str | None = None,
+        max_num: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[ServiceAlert]:
         """Fetch currently active service alerts, optionally narrowed down.
 
         Without arguments: all active alerts network-wide — construction
@@ -390,9 +541,22 @@ class KVBHafasClient:
         the response's locL, or names the stop in its text (most alerts
         carry no loc reference at all and only name the stop in plain text,
         e.g. "(H) Ulrepforte").
+
+        `max_num`: serverseitiges Limit auf die Anzahl Meldungen.
+
+        `date_from`/`date_to` (YYYYMMDD) grenzen den Gültigkeitszeitraum
+        ein — **kein Zugriff auf die Vergangenheit**: der HIM-Speicher hält
+        nur aktuell gültige und künftige Meldungen, abgelaufene sind weg.
+        Siehe docs/API.md#historische-daten.
         """
-        him_fltr = [{"type": "LINE", "mode": "INC", "value": line}] if line else []
-        res = self._call("HimSearch", {"himFltrL": him_fltr})
+        req: dict[str, Any] = {"himFltrL": [{"type": "LINE", "mode": "INC", "value": line}] if line else []}
+        if max_num is not None:
+            req["maxNum"] = max_num
+        if date_from:
+            req["dateB"] = date_from
+        if date_to:
+            req["dateE"] = date_to
+        res = self._call("HimSearch", req)
         common = res.get("common", {})
         alerts = []
         for msg in res.get("msgL", []):
@@ -799,3 +963,50 @@ class KVBHafasClient:
         steckt ohnehin im Kontext.
         """
         return self._parse_connections(self._call("SearchOnTrip", {"ctxRecon": ctx_recon}))
+
+    def affected_stops(self) -> list[Stop]:
+        """Haltestellen, die aktuell von einer Störung betroffen sind (HimMatch).
+
+        Parameterlos — die Methode nimmt kein einziges Feld an. Liefert
+        Steig-Einträge (extId `300xxxxxx`) ohne Koordinaten; für den
+        Master-Eintrag den Namen über find_stops() nachschlagen.
+        """
+        res = self._call("HimMatch", {})
+        stops, seen = [], set()
+        for loc in res.get("affStL", []):
+            ext_id = loc.get("extId", "")
+            if ext_id in seen:
+                continue
+            seen.add(ext_id)
+            crd = loc.get("crd") or {}
+            has_crd = bool(crd.get("x") or crd.get("y"))
+            stops.append(
+                Stop(
+                    name=loc.get("name", ""),
+                    ext_id=ext_id,
+                    lat=crd["y"] / 1_000_000 if has_crd else None,
+                    lon=crd["x"] / 1_000_000 if has_crd else None,
+                )
+            )
+        return stops
+
+    def lines_in_area(self, lat: float, lon: float, radius_m: int = 500) -> list[Line]:
+        """Alle Linien im Umkreis eines Punktes (LineGeoPos).
+
+        Vollständiger als stop_details().lines — dort fehlen die Nachtlinien
+        (Neumarkt: 9 vs. 14). Der Server deckelt bei 50 Linien pro Anfrage;
+        für größere Gebiete in Kacheln abfragen.
+        """
+        res = self._call("LineGeoPos", {"ring": {"cCrd": {"x": round(lon * 1_000_000), "y": round(lat * 1_000_000)}, "maxDist": radius_m}})
+        prod_l = res.get("common", {}).get("prodL", [])
+        lines, seen = [], set()
+        for entry in res.get("lineL", []):
+            prod_idx = entry.get("prodX")
+            if prod_idx is None or prod_idx >= len(prod_l):
+                continue
+            line = _line_from_prod(prod_l[prod_idx], entry.get("lineId", ""))
+            if line.line_id in seen:
+                continue
+            seen.add(line.line_id)
+            lines.append(line)
+        return lines
