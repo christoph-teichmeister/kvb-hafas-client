@@ -12,8 +12,7 @@ verwenden.
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -56,11 +55,47 @@ class ServiceAlert:
 
 
 @dataclass
+class Leg:
+    """Ein Abschnitt einer Verbindung: entweder eine Fahrt oder ein Fußweg."""
+
+    walk: bool
+    from_name: str
+    to_name: str
+    dep_time: str
+    arr_time: str
+    line: str | None = None  # None bei Fußweg
+    direction: str | None = None
+    dep_platform: str | None = None
+    arr_platform: str | None = None
+    dist_m: int | None = None  # nur bei Fußweg
+
+
+@dataclass
 class Connection:
     dep_time: str
     arr_time: str
-    num_changes: int  # Anzahl Umstiege (len(secL) - 1, min 0)
+    num_changes: int  # Anzahl Fahrt-Abschnitte - 1 (Fußwege zählen nicht)
+    legs: list[Leg] = field(default_factory=list)
 
+
+
+def _mast_steig(loc_l: list[dict[str, Any]], loc_x: int | None) -> str | None:
+    """Steig aus der Mast-extId ableiten, wenn HAFAS kein dPlatf liefert.
+
+    Kleinere Haltestellen haben keine Gleisangabe, aber `stbStop.locX` zeigt auf
+    den konkreten Mast in `common.locL`: die 9-stellige Haltestellen-ID
+    (9000002 49) erscheint dort als 3000249 0X, letzte Ziffer = Steig.
+    Der übergeordnete Eintrag (extId 900...) hat keinen Steig -> None.
+
+    ponytail: Heuristik auf dem ID-Schema, kein dokumentiertes Feld. Bricht,
+    wenn KVB die Mast-IDs umstellt — dann fällt nur der Fallback weg.
+    """
+    if loc_x is None or loc_x >= len(loc_l):
+        return None
+    ext_id = loc_l[loc_x].get("extId", "")
+    if len(ext_id) == 9 and ext_id.startswith("3") and ext_id[-1] != "0":
+        return f"Steig {ext_id[-1]}"
+    return None
 
 
 class KVBHafasClient:
@@ -189,6 +224,7 @@ class KVBHafasClient:
             },
         )
         prod_l = res.get("common", {}).get("prodL", [])
+        loc_l = res.get("common", {}).get("locL", [])
         departures = []
         for jny in res.get("jnyL", []):
             stb = jny.get("stbStop", {})
@@ -200,25 +236,39 @@ class KVBHafasClient:
                     direction=jny.get("dirTxt", ""),
                     planned=stb.get("dTimeS", ""),
                     realtime=stb.get("dTimeR"),
-                    platform=stb.get("dPlatfR") or stb.get("dPlatfS"),
+                    platform=stb.get("dPlatfR") or stb.get("dPlatfS") or _mast_steig(loc_l, stb.get("locX")),
                     cancelled=bool(jny.get("isCncl", False)),
                     jid=jny.get("jid", ""),
                 )
             )
         return departures
 
-    def service_alerts(self) -> list[ServiceAlert]:
-        """Fetch all currently active service alerts network-wide.
+    def service_alerts(self, stop: Stop | None = None, line: str | None = None) -> list[ServiceAlert]:
+        """Fetch currently active service alerts, optionally narrowed down.
 
-        Includes construction notices, elevator outages, stop relocations —
-        and, mixed in, KVB marketing announcements (cat=99 in the raw data;
-        filter those out client-side if you only want disruptions). There is
-        no per-station/per-line filter that reliably works yet (see
-        docs/API.md) — this returns everything active right now.
+        Without arguments: all active alerts network-wide — construction
+        notices, elevator outages, stop relocations, and mixed in KVB
+        marketing announcements (cat=99 in the raw data; filter those out
+        client-side if you only want disruptions).
+
+        `line`: line label as shown on the station board ("133", "18").
+        Filtered server-side (`himFltrL` type LINE). An unknown label
+        returns an empty list rather than an error.
+
+        `stop` (a Stop from find_stops/nearby_stops): filtered client-side,
+        since HAFAS has no working server-side station filter (see
+        docs/API.md). An alert matches if it references the stop's extId in
+        the response's locL, or names the stop in its text (most alerts
+        carry no loc reference at all and only name the stop in plain text,
+        e.g. "(H) Ulrepforte").
         """
-        res = self._call("HimSearch", {"himFltrL": []})
+        him_fltr = [{"type": "LINE", "mode": "INC", "value": line}] if line else []
+        res = self._call("HimSearch", {"himFltrL": him_fltr})
+        common = res.get("common", {})
         alerts = []
         for msg in res.get("msgL", []):
+            if stop is not None and not self._alert_matches_stop(msg, common, stop):
+                continue
             alerts.append(
                 ServiceAlert(
                     text=msg.get("text", "").strip(),
@@ -229,6 +279,40 @@ class KVBHafasClient:
                 )
             )
         return alerts
+
+    @staticmethod
+    def _alert_matches_stop(msg: dict[str, Any], common: dict[str, Any], stop: Stop) -> bool:
+        loc_l = common.get("locL", [])
+        event_l = common.get("himMsgEventL", [])
+
+        loc_idx = {msg.get("fLocX"), msg.get("tLocX")}
+        for ref in msg.get("eventRefL", []):
+            if ref < len(event_l):
+                loc_idx |= {event_l[ref].get("fLocX"), event_l[ref].get("tLocX")}
+        for idx in loc_idx:
+            if idx is None or idx >= len(loc_l):
+                continue
+            loc = loc_l[idx]
+            # Stop entries come as a platform-level loc (extId 300xxxxxx) plus a
+            # master loc (extId 900xxxxxx) — find_stops returns the latter.
+            candidates = [loc]
+            mast = loc.get("mMastLocX")
+            if mast is not None and mast < len(loc_l):
+                candidates.append(loc_l[mast])
+            if any(c.get("extId") == stop.ext_id for c in candidates):
+                return True
+
+        # Naive name match: drop leading city/district words off "Köln Lindenthal
+        # Bachemer Str." until something matches the text's "(H) Bachemer Str.".
+        # Remainders that are short single words ("Str.", "Bf") are skipped —
+        # they'd match nearly every alert.
+        words = stop.name.split()
+        text = msg.get("text", "")
+        for i in range(len(words)):
+            name = " ".join(words[i:])
+            if (len(words) - i >= 2 or len(name) >= 6) and name in text:
+                return True
+        return False
 
     def trip_search(
         self, from_ext_id: str, to_ext_id: str, date: str | None = None, time: str | None = None
@@ -249,25 +333,44 @@ class KVBHafasClient:
             req["outTime"] = time
 
         res = self._call("TripSearch", req)
+        common = res.get("common", {})
+        loc_l = common.get("locL", [])
+        prod_l = common.get("prodL", [])
+
+        def loc_name(idx: int | None) -> str:
+            return loc_l[idx].get("name", "") if idx is not None and idx < len(loc_l) else ""
+
         connections = []
         for con in res.get("outConL", []):
-            sec_l = con.get("secL", [])
+            legs = []
+            for sec in con.get("secL", []):
+                dep, arr = sec.get("dep", {}), sec.get("arr", {})
+                jny = sec.get("jny")
+                prod_idx = (jny or {}).get("prodX")
+                legs.append(
+                    Leg(
+                        walk=jny is None,
+                        from_name=loc_name(dep.get("locX")),
+                        to_name=loc_name(arr.get("locX")),
+                        dep_time=dep.get("dTimeR") or dep.get("dTimeS", ""),
+                        arr_time=arr.get("aTimeR") or arr.get("aTimeS", ""),
+                        line=prod_l[prod_idx].get("name") if prod_idx is not None and prod_idx < len(prod_l) else None,
+                        direction=(jny or {}).get("dirTxt"),
+                        dep_platform=dep.get("dPlatfR") or dep.get("dPlatfS"),
+                        arr_platform=arr.get("aPlatfR") or arr.get("aPlatfS"),
+                        dist_m=sec.get("gis", {}).get("dist") if jny is None else None,
+                    )
+                )
+            # Umstiege = Fahrten - 1. secL enthält auch Fußwege (oft mehrere
+            # winzige zwischen den Steigen derselben Haltestelle), die sonst
+            # als Umstieg durchgehen würden.
+            rides = sum(1 for leg in legs if not leg.walk)
             connections.append(
                 Connection(
                     dep_time=con.get("dep", {}).get("dTimeS", ""),
                     arr_time=con.get("arr", {}).get("aTimeS", ""),
-                    num_changes=max(len(sec_l) - 1, 0),
+                    num_changes=max(rides - 1, 0),
+                    legs=legs,
                 )
             )
         return connections
-
-
-if __name__ == "__main__":
-    client = KVBHafasClient()
-    stops = client.find_stops("Neumarkt")
-    print(f"Gefunden: {[s.name for s in stops]}")
-    if stops:
-        deps = client.station_board(stops[0].ext_id)
-        for d in deps:
-            status = "AUSFALL" if d.cancelled else ""
-            print(f"{d.planned} (rt:{d.realtime}) Linie {d.line} -> {d.direction} {status}")

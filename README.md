@@ -68,25 +68,25 @@ for dep in client.station_board(stops[0].ext_id):
     print(dep.planned, dep.realtime, dep.line, dep.direction, dep.cancelled)
 ```
 
-Oder direkt über die CLI:
+Oder interaktiv über die CLI (Menü mit Abfahrten, Verbindungssuche, Umkreissuche, Störungsmeldungen):
 
 ```bash
-uv run example.py Neumarkt
+uv run main.py
 ```
 
 ## Was funktioniert
 
-| Feature                                                    | Status                                                                                                                                                                                          |
-|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Haltestellensuche (`find_stops`)                           | ✅                                                                                                                                                                                              |
-| Umkreissuche (`nearby_stops`)                              | ✅ liefert aber auch POIs, kein reiner Stop-Filter                                                                                                                                              |
-| Echtzeit-Abfahrten (`station_board`)                       | ✅ inkl. Soll/Ist-Zeiten                                                                                                                                                                        |
-| Fahrtausfälle (`isCncl`-Flag)                              | ✅ vorhanden, noch nicht gegen echten Ausfall verifiziert                                                                                                                                       |
-| Zwischenhalte einer Fahrt (`journey_details`)              | ✅                                                                                                                                                                                              |
-| Verbindungssuche (`trip_search`)                           | ✅                                                                                                                                                                                              |
-| Störungsmeldungen (`service_alerts`)                       | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — **kein Filter nach Haltestelle/Linie**, du musst client-seitig filtern (und die eingestreute KVB-Werbung, `category == 99`, selbst rausfiltern) |
-| Historische Ist-Daten (Verspätungen/Ausfälle rückblickend) | ❌ nicht verfügbar, nur der Fahrplan der aktuellen Periode — siehe [docs/API.md](docs/API.md#historische-daten)                                                                                 |
-| Auslastungsdaten                                           | ❌ nicht gefunden, vermutlich von KVB nicht befüllt                                                                                                                                             |
+| Feature                                                    | Status                                                                                                                                                                                                                         |
+|------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Haltestellensuche (`find_stops`)                           | ✅                                                                                                                                                                                                                             |
+| Umkreissuche (`nearby_stops`)                              | ✅ liefert aber auch POIs, kein reiner Stop-Filter                                                                                                                                                                             |
+| Echtzeit-Abfahrten (`station_board`)                       | ✅ inkl. Soll/Ist-Zeiten                                                                                                                                                                                                       |
+| Fahrtausfälle (`isCncl`-Flag)                              | ✅ vorhanden, noch nicht gegen echten Ausfall verifiziert                                                                                                                                                                      |
+| Zwischenhalte einer Fahrt (`journey_details`)              | ✅                                                                                                                                                                                                                             |
+| Verbindungssuche (`trip_search`)                           | ✅                                                                                                                                                                                                                             |
+| Störungsmeldungen (`service_alerts`)                       | ✅ netzweit, inkl. Baustellen/Aufzugsausfälle — `line="133"` filtert serverseitig, `stop=…` client-seitig (Loc-Referenz + Namensabgleich im Text). Die eingestreute KVB-Werbung (`category == 99`) musst du selbst rausfiltern |
+| Historische Ist-Daten (Verspätungen/Ausfälle rückblickend) | ❌ nicht verfügbar, nur der Fahrplan der aktuellen Periode — siehe [docs/API.md](docs/API.md#historische-daten)                                                                                                                |
+| Auslastungsdaten                                           | ❌ nicht gefunden, vermutlich von KVB nicht befüllt                                                                                                                                                                            |
 
 **Vollständige API-Referenz mit allen Feldern, Beispiel-Requests und
 Fehlercodes:** [docs/API.md](docs/API.md)

@@ -3,6 +3,7 @@ from .client import (
     Departure,
     KVBHafasClient,
     KVBHafasError,
+    Leg,
     ServiceAlert,
     Stop,
 )
@@ -13,5 +14,6 @@ __all__ = [
     "Departure",
     "ServiceAlert",
     "Connection",
+    "Leg",
     "KVBHafasError",
 ]

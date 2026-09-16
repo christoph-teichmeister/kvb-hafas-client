@@ -230,21 +230,64 @@ Filter) liefert alle aktuell aktiven Meldungen netzweit, statt eines Fehlers:
 
 **Response** (`res.msgL[]`), pro Meldung u.a.:
 
-| Feld            | Bedeutung                                                                                                                                             |
-|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `text`          | Meldungstext (Klartext, oft mit `(H)` für Haltestelle)                                                                                                |
-| `cat`           | Kategorie: `1` = Aufzug/Fahrzeuge außer Betrieb, `3` = Baumaßnahme/Verlegung, `99` = **Marketing** (KVB-Werbung, kein Betriebshinweis — rausfiltern!) |
-| `prio`          | Priorität                                                                                                                                             |
-| `sDate`/`eDate` | Gültigkeitszeitraum (Start/Ende, `YYYYMMDD`)                                                                                                          |
-| `fLocX`/`tLocX` | Index in `res.common.locL[]` — betroffene Haltestelle(n), falls vorhanden                                                                             |
+| Feld            | Bedeutung                                                                                                                                                                             |
+|-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `text`          | Meldungstext (Klartext, oft mit `(H)` für Haltestelle)                                                                                                                                |
+| `cat`           | Kategorie: `1` = Aufzug/Fahrzeuge außer Betrieb, `3` = Baumaßnahme/Verlegung, `99` = **Marketing** (KVB-Werbung, kein Betriebshinweis — rausfiltern!)                                 |
+| `prio`          | Priorität                                                                                                                                                                             |
+| `sDate`/`eDate` | Gültigkeitszeitraum (Start/Ende, `YYYYMMDD`)                                                                                                                                          |
+| `fLocX`/`tLocX` | Index in `res.common.locL[]` — betroffene Haltestelle(n), falls vorhanden                                                                                                             |
+| `prod`          | Verkehrsmittel-Bitmaske (`8`, `266`, `0`) — **keine Linien-Angabe**; `res.common.prodL` ist leer, betroffene Linien stehen nur im Klartext ("Linie 133") und nur in ~8% der Meldungen |
 
-⚠️ Es gibt **keinen funktionierenden Filter nach Haltestelle oder Linie** —
-alle bisher getesteten `himFltrL`-Filtertypen (`STATION`, `PROD`, mit
-`mode: "INC"` oder ohne) führten zu einem `PARSE`-Fehler auf
-Envelope-Ebene (`res.svcResL` leer, `err` direkt im Top-Level-Objekt statt
-in `svcResL[0]`). Einzig `REG` mit einem numerischen Wert (`"1"`) und der
-leere Filter funktionieren. Client-seitiges Filtern nach `fLocX`/`tLocX`
-gegen die gewünschte `extId` ist der pragmatische Workaround.
+**Filter nach Linie funktioniert** — `type: "LINE"` mit `mode: "INC"` und
+dem Linien-Label wie auf dem Abfahrtsmonitor:
+
+```json
+{
+  "meth": "HimSearch",
+  "req": {
+    "himFltrL": [
+      {
+        "type": "LINE",
+        "mode": "INC",
+        "value": "133"
+      }
+    ]
+  }
+}
+```
+
+- Ohne `mode: "INC"` wird der Filter stillschweigend ignoriert (liefert
+  wieder alle Meldungen) — `mode` ist Pflicht.
+- Unbekanntes Label (`"999"`, `"Bus 133"`) → leere `msgL`, kein Fehler.
+- Getestet: `"133"` → 25, `"142"` → 19 Meldungen (mit Schnittmenge, aber je
+  10 eigenen). Die Stadtbahnlinien `1`/`7`/`9`/`18` lieferten identische
+  22er-Sets — aktuell sind alle Stadtbahn-Meldungen netzweit, das ist der
+  Datenstand, keine Filter-Schwäche.
+- `type: "LINEID"` und `"STATION"` → `PARSE`-Fehler.
+
+⚠️ **Kein funktionierender Filter nach Haltestelle** — alle getesteten
+`himFltrL`-Varianten (`STATION`, mit `mode: "INC"` oder ohne) führten zu
+einem `PARSE`-Fehler auf Envelope-Ebene (`res.svcResL` leer, `err` direkt
+im Top-Level-Objekt statt in `svcResL[0]`). Neben `LINE` funktionieren nur
+`PROD` (Verkehrsmittel-Bitmaske, `"8"` → 60 Meldungen), `REG` mit
+numerischem Wert (`"1"`) und der leere Filter. Client-seitiges Filtern nach
+Haltestelle ist der pragmatische
+Workaround — `service_alerts(stop)` macht genau das:
+
+1. **Loc-Referenzen**: `fLocX`/`tLocX` der Meldung plus die der über
+   `eventRefL` verlinkten `common.himMsgEventL`-Einträge, aufgelöst gegen
+   `common.locL`. Achtung: `locL` enthält pro Haltestelle einen
+   Steig-Eintrag (`extId` `300xxxxxx`) **und** über `mMastLocX` einen
+   Master-Eintrag (`extId` `900xxxxxx`) — nur letzterer entspricht der
+   `extId` aus `find_stops`.
+2. **Textabgleich**: Der Großteil der Meldungen (~2/3, v.a. Aufzugs- und
+   Baustellenmeldungen) hat *gar keine* Loc-Referenz und nennt die
+   Haltestelle nur im Klartext (`"(H) Ulrepforte"`). Daher zusätzlich
+   Namensabgleich: vom Haltestellennamen werden führende Wörter (Stadt/Stadtteil, `"Köln Lindenthal Bachemer Str."`)
+   abgeschnitten, bis
+   der Rest im Text vorkommt. Kurze Ein-Wort-Reste (`"Str."`) werden
+   verworfen, sonst matcht alles.
 
 Gültige `type`-Werte laut einer Fehlermeldung bei falscher Groß-/
 Kleinschreibung: `EID, SRC, DEPT, HIMID, TRAIN, HIMCAT, PID, HIMTAG, COMP,
