@@ -37,6 +37,11 @@ class ServiceAlert:
     priority: int
     valid_from: str  # sDate (YYYYMMDD)
     valid_to: str  # eDate (YYYYMMDD)
+    head: str = ""  # Kurzfassung, oft leer
+    hid: str = ""  # HIM-ID, stabil über mehrere Abfragen
+    stops: tuple[str, ...] = ()  # betroffene Haltestellen laut Loc-Referenz
+    # Koordinaten der betroffenen Orte (aus himMsgEdgeL.icoCrd bzw. den Loc-Referenzen)
+    points: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -103,6 +108,15 @@ class Vehicle:
     lat: float
     lon: float
     jid: str
+    category: str = ""  # prodCtx.catOut: "Str" (Stadtbahn), "Bus", "S-Bahn", ...
+    bearing: int | None = None  # dirGeo: Fahrtrichtung in Grad
+    delay: int | None = None  # Minuten am nächsten Halt, None = keine Echtzeit
+    next_stop: str = ""
+    colour: str = ""  # offizielle Linienfarbe aus common.icoL, "#rrggbb"
+    text_colour: str = ""  # passende Schriftfarbe dazu
+    # Animations-Track (offset_ms, lat, lon) aus dem ani-Block, 0..120 s ab
+    # Abfragezeitpunkt — damit eine Karte flüssig animieren kann, ohne zu pollen.
+    track: list[tuple[int, float, float]] = field(default_factory=list)
 
 
 @dataclass

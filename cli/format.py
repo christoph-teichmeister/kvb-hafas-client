@@ -1,5 +1,8 @@
 """HAFAS-Rohwerte (Zeit, Datum, Dauer) in menschenlesbare Strings."""
 
+from kvb_hafas.parsing import _delay_minutes
+
+
 def hhmm(t: str) -> str:
     """HAFAS-Zeit ("224400", ggf. mit Tages-Prefix "01224400") -> "22:44"."""
     t = t[-6:]
@@ -19,10 +22,5 @@ def dur_min(d: str) -> str:
 
 
 def delay_min(planned: str, realtime: str) -> int:
-    """Verspätung in Minuten aus zwei HAFAS-Zeiten (ohne Tagesüberlauf)."""
-
-    def minutes(t: str) -> int:
-        t = t[-6:]
-        return int(t[:2]) * 60 + int(t[2:4])
-
-    return minutes(realtime) - minutes(planned)
+    """Verspätung in Minuten aus zwei HAFAS-Zeiten; unlesbare Zeiten -> 0."""
+    return _delay_minutes(planned, realtime) or 0
