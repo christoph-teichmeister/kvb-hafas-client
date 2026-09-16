@@ -12,6 +12,7 @@ verwenden.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -134,6 +135,32 @@ class Reachable:
 
 
 @dataclass
+class JourneyStop:
+    """Ein Halt im Laufweg einer Fahrt (JourneyDetails)."""
+
+    idx: int  # Position im Laufweg, 0 = Startpunkt
+    stop: Stop  # ext_id ist die Mast-ID (300xxxxxNN), nicht die Haltestellen-ID
+    arr_planned: str | None  # HAFAS-Zeitstring, ggf. mit Tagesübertrags-Präfix
+    dep_planned: str | None
+    arr_realtime: str | None = None
+    dep_realtime: str | None = None
+    cancelled: bool = False
+
+
+@dataclass
+class JourneyRoute:
+    """Kompletter Laufweg einer Fahrt, Halte bereits aufgelöst."""
+
+    jid: str
+    line: str
+    direction: str
+    date: str  # YYYYMMDD, Betriebstag der Fahrt
+    service_days: str  # sDaysI, Klartext ("16. bis 30. Sep 2026 Mo - Fr")
+    service_bits: str  # sDaysB, Bitmaske ab fpB (siehe server_info())
+    stops: list[JourneyStop] = field(default_factory=list)
+
+
+@dataclass
 class ScheduledJourney:
     """Eine Fahrt aus dem Fahrplan (JourneyMatch) — ohne Echtzeit."""
 
@@ -219,16 +246,32 @@ class KVBHafasClient:
         deps = client.station_board(stops[0].ext_id)
     """
 
-    def __init__(self, session: requests.Session | None = None, timeout: float = 10.0):
+    def __init__(
+        self,
+        session: requests.Session | None = None,
+        timeout: float = 10.0,
+        min_interval: float = 0.0,
+    ):
+        """`min_interval` erzwingt einen Mindestabstand (Sekunden) zwischen zwei
+        Requests. Default 0 = aus, damit interaktive Nutzung nicht ausgebremst
+        wird; Batch-Jobs (siehe fetch_timetable.py) setzen es auf >= 1.0, um die
+        Rate-Limit-Zusage aus dem README einzuhalten."""
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.min_interval = min_interval
         self._req_counter = 0
+        self._last_call = 0.0
 
     def _next_id(self) -> str:
         self._req_counter += 1
         return f"{self._req_counter}@"
 
     def _call(self, meth: str, req: dict[str, Any]) -> dict[str, Any]:
+        if self.min_interval:
+            wait = self._last_call + self.min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
         payload = {
             "id": self._next_id(),
             "ver": "1.16",
@@ -331,27 +374,100 @@ class KVBHafasClient:
     def journey_details(self, jid: str) -> dict[str, Any]:
         """Fetch full stop-by-stop details for a single journey.
 
-        `jid` comes from a Departure/journey object's "jid" field (not
-        currently exposed on the Departure dataclass — extend station_board
-        if you need it, or call _call("StationBoard", ...) directly and
-        read jny["jid"]).
+        `jid` comes from `Departure.jid`.
 
         Returns the raw `journey` dict (includes `stopL`: every stop with
-        planned/realtime arrival+departure times and platform info).
+        planned/realtime arrival+departure times and platform info). Die
+        Halte darin referenzieren Orte nur per `locX`-Index — zum Auflösen
+        siehe journey_route().
         """
         res = self._call("JourneyDetails", {"jid": jid})
         return res.get("journey", {})
 
-    def station_board(self, stop_ext_id: str, max_journeys: int = 10) -> list[Departure]:
-        """Fetch the live departure board for a stop (by extId, see find_stops)."""
-        res = self._call(
-            "StationBoard",
-            {
-                "type": "DEP",
-                "stbLoc": {"extId": stop_ext_id},
-                "maxJny": max_journeys,
-            },
+    def journey_route(self, jid: str) -> JourneyRoute:
+        """Kompletter Laufweg einer Fahrt mit aufgelösten Haltestellen.
+
+        Im Gegensatz zu journey_details() wird hier `common.locL`
+        mitausgewertet — ohne das sind die `locX`-Indizes der Halte
+        wertlos. Liefert außerdem die Verkehrstage (`sDaysL`), die sonst nur
+        JourneyMatch herausgibt.
+
+        Achtung: die `ext_id` eines Halts ist eine **Mast-ID** (9-stellig,
+        `300xxxxxNN`), nicht die Haltestellen-ID aus find_stops()
+        (`900xxxxxx`). Pro Richtung/Bahnsteig eine eigene ID — fürs
+        Zusammenfassen beider Richtungen über `name` gruppieren.
+        """
+        res = self._call("JourneyDetails", {"jid": jid})
+        jny = res.get("journey", {})
+        loc_l = res.get("common", {}).get("locL", [])
+        prod_l = res.get("common", {}).get("prodL", [])
+        prod_idx = jny.get("prodX")
+        s_days = (jny.get("sDaysL") or [{}])[0]
+
+        stops = []
+        for st in jny.get("stopL", []):
+            loc = loc_l[st["locX"]] if st.get("locX") is not None and st["locX"] < len(loc_l) else {}
+            crd = loc.get("crd", {})
+            stops.append(
+                JourneyStop(
+                    idx=st.get("idx", 0),
+                    stop=Stop(
+                        name=loc.get("name", ""),
+                        ext_id=loc.get("extId", ""),
+                        lat=crd.get("y", 0) / 1_000_000 if crd.get("y") is not None else None,
+                        lon=crd.get("x", 0) / 1_000_000 if crd.get("x") is not None else None,
+                    ),
+                    arr_planned=st.get("aTimeS"),
+                    dep_planned=st.get("dTimeS"),
+                    arr_realtime=st.get("aTimeR"),
+                    dep_realtime=st.get("dTimeR"),
+                    cancelled=bool(st.get("aCncl") or st.get("dCncl")),
+                )
+            )
+
+        return JourneyRoute(
+            jid=jny.get("jid", jid),
+            line=prod_l[prod_idx].get("name", "") if prod_idx is not None and prod_idx < len(prod_l) else "",
+            direction=jny.get("dirTxt", ""),
+            date=jny.get("date", ""),
+            service_days=s_days.get("sDaysI", ""),
+            service_bits=s_days.get("sDaysB", ""),
+            stops=stops,
         )
+
+    def station_board(
+        self,
+        stop_ext_id: str,
+        max_journeys: int = 10,
+        date: str | None = None,
+        time: str | None = None,
+        board_type: str = "DEP",
+    ) -> list[Departure]:
+        """Fetch the departure board for a stop (by extId, see find_stops).
+
+        Ohne `date`/`time` (Format `YYYYMMDD` / `HHMMSS`) gilt "jetzt" und die
+        Antwort trägt Echtzeitwerte. Mit einem Datum lässt sich der Fahrplan
+        innerhalb der Fahrplanperiode (siehe server_info()) abfragen — dann
+        liefert HAFAS allerdings nur Soll-Zeiten, `realtime` bleibt leer.
+
+        `board_type` ist `"DEP"` (Abfahrten) oder `"ARR"` (Ankünfte). An einer
+        Endhaltestelle deckt DEP die eine, ARR die andere Fahrtrichtung ab.
+
+        `max_journeys` wird serverseitig durch die Dichte der Haltestelle
+        gedeckelt: an einem ruhigen Halt reicht ein Request für den ganzen
+        Tag, an einem Knoten wie Heumarkt bricht die Liste vorzeitig ab —
+        dort muss über `time` weitergeblättert werden.
+        """
+        req: dict[str, Any] = {
+            "type": board_type,
+            "stbLoc": {"extId": stop_ext_id},
+            "maxJny": max_journeys,
+        }
+        if date:
+            req["date"] = date
+        if time:
+            req["time"] = time
+        res = self._call("StationBoard", req)
         prod_l = res.get("common", {}).get("prodL", [])
         loc_l = res.get("common", {}).get("locL", [])
         departures = []
@@ -363,8 +479,8 @@ class KVBHafasClient:
                 Departure(
                     line=line,
                     direction=jny.get("dirTxt", ""),
-                    planned=stb.get("dTimeS", ""),
-                    realtime=stb.get("dTimeR"),
+                    planned=stb.get("dTimeS") or stb.get("aTimeS", ""),
+                    realtime=stb.get("dTimeR") or stb.get("aTimeR"),
                     platform=stb.get("dPlatfR") or stb.get("dPlatfS") or _mast_steig(loc_l, stb.get("locX")),
                     cancelled=bool(jny.get("isCncl", False)),
                     jid=jny.get("jid", ""),
