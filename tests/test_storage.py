@@ -76,3 +76,27 @@ def test_known_jids_enables_resume():
     conn = storage.connect(":memory:")
     storage.store_route(conn, _route(jid="A"))
     assert storage.known_jids(conn) == {"A"}
+
+
+def test_store_route_keeps_station_id():
+    """Beide Fahrtrichtungen einer Haltestelle haben verschiedene Mast-IDs,
+    aber dieselbe station_id — sonst ließen sie sich nicht zusammenfassen."""
+    conn = storage.connect(":memory:")
+    hin = JourneyRoute(
+        jid="hin", line="5", direction="Heumarkt", date="20260917",
+        service_days="", service_bits="",
+        stops=[JourneyStop(idx=0, stop=Stop(name="Halt", ext_id="300090301"),
+                           dep_planned="080000", arr_planned=None, station_ext_id="900000903")],
+    )
+    rueck = JourneyRoute(
+        jid="rueck", line="5", direction="Am Butzweilerhof", date="20260917",
+        service_days="", service_bits="",
+        stops=[JourneyStop(idx=0, stop=Stop(name="Halt", ext_id="300090302"),
+                           dep_planned="081000", arr_planned=None, station_ext_id="900000903")],
+    )
+    storage.store_route(conn, hin)
+    storage.store_route(conn, rueck)
+
+    rows = conn.execute("SELECT ext_id, station_id FROM stop ORDER BY ext_id").fetchall()
+    assert rows == [("300090301", "900000903"), ("300090302", "900000903")]
+    assert conn.execute("SELECT COUNT(DISTINCT station_id) FROM stop").fetchone()[0] == 1

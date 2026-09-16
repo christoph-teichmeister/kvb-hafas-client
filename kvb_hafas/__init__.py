@@ -12,6 +12,7 @@ from .client import (
     ServerInfo,
     ServiceAlert,
     Stop,
+    station_ext_id,
     Vehicle,
     WalkRoute,
 )
@@ -32,4 +33,5 @@ __all__ = [
     "Vehicle",
     "WalkRoute",
     "KVBHafasError",
+    "station_ext_id",
 ]

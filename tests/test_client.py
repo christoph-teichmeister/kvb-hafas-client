@@ -706,3 +706,85 @@ def test_no_throttle_by_default(monkeypatch):
         client.station_board("900000002")
 
     assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "mast,expected",
+    [
+        ("300090301", "900000903"),  # Sparkasse am Butzweilerhof
+        ("300000151", "900000001"),  # Heumarkt, Steig 51
+        ("300097601", "900000976"),  # Ikea am Butzweilerhof
+        ("300023901", "900000239"),
+        ("900000903", None),  # Master-ID bleibt unangetastet
+        ("30009030", None),  # zu kurz
+        ("3000903A1", None),  # nicht numerisch
+        ("", None),
+    ],
+)
+def test_station_ext_id(mast, expected):
+    from kvb_hafas import station_ext_id
+
+    assert station_ext_id(mast) == expected
+
+
+def test_journey_route_sets_station_ext_id():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(JOURNEYDETAILS_ROUTE_RESPONSE)):
+        route = client.journey_route("1|9526|16|1|17092026")
+
+    assert [s.station_ext_id for s in route.stops] == ["900000903", "900000001"]
+
+
+HIMMATCH_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "HimMatch",
+            "err": "OK",
+            "res": {
+                "common": {},
+                "affStL": [
+                    {"name": "Köln Ubierring", "extId": "300001701", "crd": {"x": 0, "y": 0}},
+                    {"name": "Köln Ubierring", "extId": "300001701", "crd": {"x": 0, "y": 0}},
+                    {"name": "Köln Dellbrück", "extId": "300059504", "crd": {"x": 7060000, "y": 50970000}},
+                ],
+            },
+        }
+    ]
+}
+
+LINEGEOPOS_RESPONSE = {
+    "svcResL": [
+        {
+            "meth": "LineGeoPos",
+            "err": "OK",
+            "res": {
+                "common": {"prodL": [{"name": "18", "prodCtx": {"catOut": "Str"}}, {"name": "146"}]},
+                "lineL": [
+                    {"lineId": "de:vrs:18", "prodX": 0},
+                    {"lineId": "de:vrs:18", "prodX": 0},
+                    {"lineId": "de:vrs:146", "prodX": 1},
+                ],
+            },
+        }
+    ]
+}
+
+
+def test_affected_stops_dedupes_and_drops_null_coords():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(HIMMATCH_RESPONSE)):
+        stops = client.affected_stops()
+
+    assert [s.ext_id for s in stops] == ["300001701", "300059504"]
+    # crd 0/0 ist "keine Koordinate", nicht Position null/null im Atlantik.
+    assert stops[0].lat is None
+    assert stops[1].lat == pytest.approx(50.97)
+
+
+def test_lines_in_area_dedupes_by_line_id():
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(LINEGEOPOS_RESPONSE)):
+        lines = client.lines_in_area(50.935667, 6.948329)
+
+    assert [line.name for line in lines] == ["18", "146"]
+    assert lines[0].category == "Str"

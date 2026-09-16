@@ -15,11 +15,14 @@ from .client import JourneyRoute
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS stop (
-    ext_id TEXT PRIMARY KEY,   -- Mast-ID (300xxxxxNN), richtungsscharf
-    name   TEXT NOT NULL,
-    lat    REAL,
-    lon    REAL
+    ext_id     TEXT PRIMARY KEY,  -- Mast-ID (300xxxxxNN), richtungsscharf
+    station_id TEXT,              -- Master-Haltestelle (900xxxxxx), beide Richtungen
+    name       TEXT NOT NULL,
+    lat        REAL,
+    lon        REAL
 );
+
+CREATE INDEX IF NOT EXISTS ix_stop_station ON stop(station_id);
 
 CREATE TABLE IF NOT EXISTS journey (
     jid          TEXT PRIMARY KEY,
@@ -83,10 +86,15 @@ def store_route(conn: sqlite3.Connection, route: JourneyRoute) -> int:
     now = datetime.now().isoformat(sep=" ", timespec="seconds")
 
     conn.executemany(
-        """INSERT INTO stop (ext_id, name, lat, lon) VALUES (?, ?, ?, ?)
-           ON CONFLICT(ext_id) DO UPDATE SET name=excluded.name,
+        """INSERT INTO stop (ext_id, station_id, name, lat, lon) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(ext_id) DO UPDATE SET station_id=excluded.station_id,
+                                             name=excluded.name,
                                              lat=excluded.lat, lon=excluded.lon""",
-        [(s.stop.ext_id, s.stop.name, s.stop.lat, s.stop.lon) for s in route.stops if s.stop.ext_id],
+        [
+            (s.stop.ext_id, s.station_ext_id, s.stop.name, s.stop.lat, s.stop.lon)
+            for s in route.stops
+            if s.stop.ext_id
+        ],
     )
     conn.execute(
         """INSERT INTO journey (jid, service_date, line, direction, service_days,

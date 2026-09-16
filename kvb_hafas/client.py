@@ -145,6 +145,7 @@ class JourneyStop:
     arr_realtime: str | None = None
     dep_realtime: str | None = None
     cancelled: bool = False
+    station_ext_id: str | None = None  # Master-Haltestelle, beide Richtungen gemeinsam
 
 
 @dataclass
@@ -216,6 +217,31 @@ def _decode_polyline(encoded: str) -> list[tuple[float, float]]:
                 lon += delta
         points.append((lat / 1e5, lon / 1e5))
     return points
+
+
+def station_ext_id(mast_ext_id: str) -> str | None:
+    """Mast-ID (`300xxxxxNN`) -> Haltestellen-ID (`900xxxxxx`).
+
+    JourneyDetails referenziert Halte richtungsscharf über Mast-IDs, während
+    find_stops() und alle anderen Methoden die Master-Haltestelle erwarten.
+    Beide hängen über die KVB-Haltestellennummer zusammen:
+
+        Mast  = "300" + nummer(4-stellig) + steig(2-stellig)
+        Halt  = 900000000 + nummer
+
+    z.B. `300090301` -> `900000903` (Sparkasse am Butzweilerhof).
+
+    Gibt `None` für alles, was nicht wie eine Mast-ID aussieht — unter anderem
+    für Master-IDs selbst, die also nicht versehentlich umgerechnet werden.
+
+    ponytail: Heuristik auf dem ID-Schema, kein dokumentiertes Feld. HAFAS
+    liefert hier kein `mMastLocX`, mit dem man es sauber auflösen könnte.
+    Verifiziert an den 34 Masten der Linie 5 (34/34). Bricht, wenn KVB die
+    Mast-IDs umstellt.
+    """
+    if len(mast_ext_id) != 9 or not mast_ext_id.startswith("300") or not mast_ext_id.isdigit():
+        return None
+    return str(900_000_000 + int(mast_ext_id[3:7]))
 
 
 def _mast_steig(loc_l: list[dict[str, Any]], loc_x: int | None) -> str | None:
@@ -394,8 +420,9 @@ class KVBHafasClient:
 
         Achtung: die `ext_id` eines Halts ist eine **Mast-ID** (9-stellig,
         `300xxxxxNN`), nicht die Haltestellen-ID aus find_stops()
-        (`900xxxxxx`). Pro Richtung/Bahnsteig eine eigene ID — fürs
-        Zusammenfassen beider Richtungen über `name` gruppieren.
+        (`900xxxxxx`) — pro Richtung/Bahnsteig eine eigene. Zum Zusammenfassen
+        beider Richtungen steht die Master-ID in `JourneyStop.station_ext_id`
+        (siehe station_ext_id()).
         """
         res = self._call("JourneyDetails", {"jid": jid})
         jny = res.get("journey", {})
@@ -422,6 +449,7 @@ class KVBHafasClient:
                     arr_realtime=st.get("aTimeR"),
                     dep_realtime=st.get("dTimeR"),
                     cancelled=bool(st.get("aCncl") or st.get("dCncl")),
+                    station_ext_id=station_ext_id(loc.get("extId", "")),
                 )
             )
 
@@ -488,7 +516,14 @@ class KVBHafasClient:
             )
         return departures
 
-    def service_alerts(self, stop: Stop | None = None, line: str | None = None) -> list[ServiceAlert]:
+    def service_alerts(
+        self,
+        stop: Stop | None = None,
+        line: str | None = None,
+        max_num: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[ServiceAlert]:
         """Fetch currently active service alerts, optionally narrowed down.
 
         Without arguments: all active alerts network-wide — construction
@@ -506,9 +541,22 @@ class KVBHafasClient:
         the response's locL, or names the stop in its text (most alerts
         carry no loc reference at all and only name the stop in plain text,
         e.g. "(H) Ulrepforte").
+
+        `max_num`: serverseitiges Limit auf die Anzahl Meldungen.
+
+        `date_from`/`date_to` (YYYYMMDD) grenzen den Gültigkeitszeitraum
+        ein — **kein Zugriff auf die Vergangenheit**: der HIM-Speicher hält
+        nur aktuell gültige und künftige Meldungen, abgelaufene sind weg.
+        Siehe docs/API.md#historische-daten.
         """
-        him_fltr = [{"type": "LINE", "mode": "INC", "value": line}] if line else []
-        res = self._call("HimSearch", {"himFltrL": him_fltr})
+        req: dict[str, Any] = {"himFltrL": [{"type": "LINE", "mode": "INC", "value": line}] if line else []}
+        if max_num is not None:
+            req["maxNum"] = max_num
+        if date_from:
+            req["dateB"] = date_from
+        if date_to:
+            req["dateE"] = date_to
+        res = self._call("HimSearch", req)
         common = res.get("common", {})
         alerts = []
         for msg in res.get("msgL", []):
@@ -915,3 +963,50 @@ class KVBHafasClient:
         steckt ohnehin im Kontext.
         """
         return self._parse_connections(self._call("SearchOnTrip", {"ctxRecon": ctx_recon}))
+
+    def affected_stops(self) -> list[Stop]:
+        """Haltestellen, die aktuell von einer Störung betroffen sind (HimMatch).
+
+        Parameterlos — die Methode nimmt kein einziges Feld an. Liefert
+        Steig-Einträge (extId `300xxxxxx`) ohne Koordinaten; für den
+        Master-Eintrag den Namen über find_stops() nachschlagen.
+        """
+        res = self._call("HimMatch", {})
+        stops, seen = [], set()
+        for loc in res.get("affStL", []):
+            ext_id = loc.get("extId", "")
+            if ext_id in seen:
+                continue
+            seen.add(ext_id)
+            crd = loc.get("crd") or {}
+            has_crd = bool(crd.get("x") or crd.get("y"))
+            stops.append(
+                Stop(
+                    name=loc.get("name", ""),
+                    ext_id=ext_id,
+                    lat=crd["y"] / 1_000_000 if has_crd else None,
+                    lon=crd["x"] / 1_000_000 if has_crd else None,
+                )
+            )
+        return stops
+
+    def lines_in_area(self, lat: float, lon: float, radius_m: int = 500) -> list[Line]:
+        """Alle Linien im Umkreis eines Punktes (LineGeoPos).
+
+        Vollständiger als stop_details().lines — dort fehlen die Nachtlinien
+        (Neumarkt: 9 vs. 14). Der Server deckelt bei 50 Linien pro Anfrage;
+        für größere Gebiete in Kacheln abfragen.
+        """
+        res = self._call("LineGeoPos", {"ring": {"cCrd": {"x": round(lon * 1_000_000), "y": round(lat * 1_000_000)}, "maxDist": radius_m}})
+        prod_l = res.get("common", {}).get("prodL", [])
+        lines, seen = [], set()
+        for entry in res.get("lineL", []):
+            prod_idx = entry.get("prodX")
+            if prod_idx is None or prod_idx >= len(prod_l):
+                continue
+            line = _line_from_prod(prod_l[prod_idx], entry.get("lineId", ""))
+            if line.line_id in seen:
+                continue
+            seen.add(line.line_id)
+            lines.append(line)
+        return lines

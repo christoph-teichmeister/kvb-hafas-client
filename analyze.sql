@@ -5,8 +5,11 @@
 -- die API rückblickend nicht her (siehe docs/API.md, "Historische Daten").
 --
 -- Hinweis zu Haltestellen-IDs: stop.ext_id ist eine Mast-ID, also pro
--- Richtung/Bahnsteig verschieden. Für "die Haltestelle" wird deshalb über
--- stop.name gruppiert, für "Haltestelle je Richtung" über ext_id.
+-- Richtung/Bahnsteig verschieden. stop.station_id ist die zugehörige
+-- Master-Haltestelle — danach wird gruppiert, wenn "die Haltestelle"
+-- unabhängig von der Richtung gemeint ist. Über den Namen zu gruppieren wäre
+-- anfällig: zwei Haltestellen dürfen gleich heißen, und Mast-Namen tragen
+-- teils Zusätze.
 
 .mode box
 .headers on
@@ -40,6 +43,7 @@ DROP VIEW IF EXISTS headway;
 CREATE TEMP VIEW headway AS
 WITH dep AS (
     SELECT s.name                AS haltestelle,
+           s.station_id          AS station_id,
            j.direction           AS richtung,
            st.dep_planned        AS abfahrt,
            CAST(strftime('%H', st.dep_planned) AS INTEGER) AS stunde,
@@ -52,7 +56,7 @@ WITH dep AS (
     JOIN stop    s ON s.ext_id = st.stop_ext_id
     WHERE st.dep_planned IS NOT NULL
 )
-SELECT haltestelle, richtung, abfahrt, stunde,
+SELECT haltestelle, station_id, richtung, abfahrt, stunde,
        CAST((julianday(abfahrt) - julianday(vorherige)) * 1440 AS INTEGER) AS takt_min
 FROM dep
 WHERE vorherige IS NOT NULL;
@@ -90,7 +94,7 @@ WITH tagsueber AS (
 ),
 norm AS (
     SELECT t.*,
-           AVG(takt_min) OVER (PARTITION BY haltestelle, richtung, stunde) AS schnitt
+           AVG(takt_min) OVER (PARTITION BY station_id, richtung, stunde) AS schnitt
     FROM tagsueber t
 )
 SELECT haltestelle, richtung, abfahrt, takt_min, ROUND(schnitt, 1) AS stundenschnitt
@@ -112,7 +116,8 @@ LIMIT 25;
 -- 3. Randzeiten: Betriebsbeginn, Betriebsende, Nachtlücke
 -- ---------------------------------------------------------------------------
 SELECT '— Erste/letzte Abfahrt je Haltestelle und Richtung —' AS "";
-SELECT s.name AS haltestelle,
+SELECT MIN(s.name) AS haltestelle,
+       s.station_id,
        j.direction AS richtung,
        MIN(st.dep_planned) AS erste,
        MAX(st.dep_planned) AS letzte,
@@ -121,8 +126,8 @@ FROM stop_time st
 JOIN journey j ON j.jid = st.jid
 JOIN stop    s ON s.ext_id = st.stop_ext_id
 WHERE st.dep_planned IS NOT NULL
-GROUP BY s.name, j.direction
-ORDER BY s.name, j.direction;
+GROUP BY s.station_id, j.direction
+ORDER BY haltestelle, j.direction;
 
 -- ---------------------------------------------------------------------------
 -- 4. Fahrzeit über den Tag — zeigt, wo schon Puffer im Fahrplan steckt

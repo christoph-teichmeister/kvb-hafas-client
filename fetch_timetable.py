@@ -32,10 +32,36 @@ ANCHORS = {
 }
 
 BOARD_MAX = 1000  # serverseitig durch die Dichte des Halts gedeckelt
+MAX_PLAUSIBLE_GAP_MIN = 60  # größere Lücke im Tagesverkehr = abgeschnittene Tafel
 
 
-def discover(client: KVBHafasClient, line: str, anchor: str, date_hafas: str) -> dict[str, str]:
-    """jid -> Richtung, für beide Fahrtrichtungen."""
+def _coverage_gap(departures: list, service_date) -> tuple[str, str, int] | None:
+    """Größte Lücke zwischen zwei aufeinanderfolgenden Fahrten, falls verdächtig.
+
+    Die nächtliche Betriebspause taucht hier nicht auf: nach Zeitstempel
+    sortiert liegt sie außerhalb von erster und letzter Fahrt, nicht
+    dazwischen. Eine Lücke *innerhalb* des Betriebstags heißt dagegen, dass
+    die Tafel abgeschnitten wurde.
+    """
+    stamps = sorted(t for t in (storage.parse_hafas_time(d.planned, service_date) for d in departures) if t)
+    worst = None
+    for earlier, later in zip(stamps, stamps[1:]):
+        minutes = int((datetime.fromisoformat(later) - datetime.fromisoformat(earlier)).total_seconds() // 60)
+        if minutes > MAX_PLAUSIBLE_GAP_MIN and (worst is None or minutes > worst[2]):
+            worst = (earlier, later, minutes)
+    return worst
+
+
+def discover(client: KVBHafasClient, line: str, anchor: str, service_date) -> dict[str, str]:
+    """jid -> Richtung, für beide Fahrtrichtungen.
+
+    Ein Board deckt nur so viele Fahrten ab, wie der Halt hergibt: an einem
+    dichten Knoten bricht die Liste mitten am Tag ab. Weil die Fahrten, die
+    dann fehlen, nirgends angemeldet werden, wird die Abdeckung hier geprüft
+    statt sie zu unterstellen — sonst fehlt am Ende ein Teil des Fahrplans,
+    ohne dass es irgendwo auffällt.
+    """
+    date_hafas = service_date.strftime("%Y%m%d")
     found: dict[str, str] = {}
     for board_type in ("DEP", "ARR"):
         try:
@@ -45,8 +71,27 @@ def discover(client: KVBHafasClient, line: str, anchor: str, date_hafas: str) ->
         except (KVBHafasError, requests.RequestException) as exc:
             print(f"  !! {board_type}-Tafel fehlgeschlagen: {exc}", file=sys.stderr)
             continue
+
         hits = [d for d in board if d.line == line and d.jid]
+        capped = len(board) >= BOARD_MAX
+        gap = _coverage_gap(hits, service_date)
         print(f"  {board_type}: {len(hits)} Fahrten der Linie {line} (von {len(board)} gesamt)")
+
+        if gap:
+            # Die Tafel ist nicht durchgehend nach Zeit sortiert: sie läuft am
+            # Ende auf den Tagesanfang über. Erste und letzte Zeit sehen dadurch
+            # vollständig aus, auch wenn mittendrin Stunden fehlen — deshalb wird
+            # hier auf die Lücke geprüft und nicht auf die Spanne.
+            print(
+                f"  !! Zwischen {gap[0][11:16]} und {gap[1][11:16]} fehlen {gap[2]} Minuten "
+                f"aus der {board_type}-Tafel.\n"
+                f"     Haltestelle {anchor} ist zu dicht befahren"
+                f"{' (Limit von ' + str(BOARD_MAX) + ' Fahrten erreicht)' if capped else ''} — "
+                f"die anderen Linien\n"
+                f"     verdrängen die Liste. Eine ruhigere Endhaltestelle als --anchor wählen,\n"
+                f"     sonst fehlt dieser Teil des Fahrplans in der DB.",
+                file=sys.stderr,
+            )
         for dep in hits:
             found.setdefault(dep.jid, dep.direction)
     return found
@@ -82,7 +127,7 @@ def main() -> int:
     conn = storage.connect(args.db)
 
     print(f"Discovery an {anchor} für {args.date}:")
-    jids = discover(client, args.line, anchor, date_hafas)
+    jids = discover(client, args.line, anchor, service_date)
     if not jids:
         print("Keine Fahrten gefunden — Anker oder Datum prüfen.", file=sys.stderr)
         return 1
