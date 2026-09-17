@@ -83,12 +83,14 @@ uv run map_server.py   # -> http://localhost:8000
 ```
 
 `map_server.py` (nur stdlib) ist ein dünner Proxy vor `vehicle_positions()`,
-`map.html` nutzt Leaflet + OpenStreetMap vom CDN. Ausschnitt folgt der Karte,
-Polling alle 45 s (Track reicht 120 s), Antworten 30 s gecacht.
+`map.html` nutzt Leaflet aus `vendor/` (lokal, damit die Karte ohne CDN-Roundtrip
+sofort steht) und OpenStreetMap-Tiles vom CDN. Ausschnitt folgt der Karte,
+Polling alle 15 s (Track reicht 120 s), Antworten 15 s gecacht.
 
 - **Streckenverlauf statt Luftlinie** — je Linie und Richtung einmal
-  `journey_segments()`, im Hintergrund gecacht; bis der Cache gefüllt ist, fährt
-  der Rest auf der Luftlinie.
+  `journey_segments_many()`, zu zehnt gebündelt im Hintergrund geholt und in
+  `map_geometry.json` gespeichert; nach einem Neustart steht das Netz sofort,
+  beim allerersten Lauf fährt der Rest solange auf der Luftlinie.
 - **Verspätung** — Minuten am nächsten Halt aus `stopL`; ab 3 min gelber Rand
   und Minuten im Label.
 - **Linienfarben** — direkt aus HAFAS (`prodL[].icoX` → `common.icoL[].bg`),
@@ -120,6 +122,7 @@ timetable/      Fahrplan-Erhebung: fetch.py (einsammeln), analyze.py + analyze.s
 main.py         Entry-Point der CLI
 map_server.py   stdlib-Server für die Live-Karte
 map.html        Live-Karte (Leaflet, pollt map_server.py)
+vendor/         Leaflet 1.9.4 lokal (leaflet.js/css + Marker-Images)
 ```
 
 Fahrplan eines Betriebstags einsammeln und auswerten:

@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KVB live</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<script src="/vendor/leaflet.js"></script>
 <style>
   html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; }
   #map { height: 100%; }
@@ -46,7 +46,7 @@
 <div class="panel" id="status">lade …</div>
 <div class="panel" id="alertlist"></div>
 <script>
-const POLL_MS = 45000;          // Track ist 120 s lang -> läuft nie leer
+const POLL_MS = 15000;          // Track ist 120 s lang -> läuft nie leer
 const ALERT_POLL_MS = 300000;
 const LATE_FROM = 3;            // ab wie vielen Minuten ein Fahrzeug als verspätet gilt
 
