@@ -8,19 +8,6 @@ Inoffizieller Python-Client für die Echtzeit-Fahrplandaten der **KVB** (Kölner
 Verkehrs-Betriebe AG), Köln — Haltestellensuche, Live-Abfahrten, Verbindungen
 und Störungsmeldungen, ohne offizielle API.
 
-## Inhalt
-
-- [Hintergrund](#hintergrund)
-- [⚠️ Rechtlicher Hinweis](#️-rechtlicher-hinweis)
-- [Installation](#installation)
-- [Nutzung](#nutzung)
-- [Projektstruktur](#projektstruktur)
-- [Was funktioniert](#was-funktioniert)
-- [Tests](#tests)
-- [Nächste Schritte / Ideen](#nächste-schritte--ideen)
-- [Mitwirken](#mitwirken)
-- [Lizenz](#lizenz)
-
 ## Hintergrund
 
 Die KVB betreibt keine offizielle öffentliche API. Dieses Projekt spricht
@@ -87,38 +74,15 @@ uv run map_server.py   # -> http://localhost:8000
 sofort steht) und OpenStreetMap-Tiles vom CDN. Ausschnitt folgt der Karte,
 Polling alle 15 s (Track reicht 120 s), Antworten 15 s gecacht.
 
-- **Streckenverlauf statt Luftlinie** — je Linie und Richtung einmal
-  `journey_segments_many()`, zu zehnt gebündelt im Hintergrund geholt und in
-  `data/map_geometry.json` gespeichert; nach einem Neustart steht das Netz sofort,
-  beim allerersten Lauf fährt der Rest solange auf der Luftlinie. Für DB-Produkte (S-Bahn, RE/RB, IC/ICE) liefert HAFAS
-  nur die Halte selbst — deren Gleise liegen fertig geroutet in
-  `data/rail_geometry.json` und sind mit im Repo, das Nachholen per
-  `uv run tools/fetch_rail_geometry.py` aus OpenStreetMap braucht es also nur bei
-  Netzänderungen. Fahrten aus der Region hinaus (Düsseldorf, Aachen) werden
-  so weit geroutet, wie das geladene Netz reicht — der Rest bleibt gerade, liegt
-  aber außerhalb der Karte. Erneute Läufe ergänzen nur, was noch fehlt.
-  Gespeichert wird je Haltestellenpaar (nicht je Mast): HAFAS vergibt Mast-IDs
-  pro Fahrt und Bahnsteig, auf Mastebene würde der Verlauf nach jedem Neustart
-  auf neue Paare nicht mehr passen. `data/rail_geometry.json` ist aus
-  OpenStreetMap-Daten abgeleitet und steht damit unter der
-  [ODbL](https://opendatacommons.org/licenses/odbl/) — © OpenStreetMap-Mitwirkende.
-- **Haltestellen** — je Verkehrsmittel zuschaltbar, eingerückt unter der
-  jeweiligen Oberkategorie (die sie beim Abwählen mitnimmt)
-  (`/api/stops`). Abfallprodukt desselben Prefetch: `journey_details_many()`
-  liefert Halte und Streckenverlauf aus einer Antwort, die Produktart kommt von
-  der Linie — also kein einziger zusätzlicher Request. Die Liste wächst wie das
-  Streckennetz mit dem Prefetch; ab Zoom 13 abwärts bleiben die Punkte aus.
-- **Verspätung** — Minuten am nächsten Halt aus `stopL`; ab 3 min gelber Rand
-  und Minuten im Label.
-- **Linienfarben** — direkt aus HAFAS (`prodL[].icoX` → `common.icoL[].bg`).
-  Ausnahme: DB-Produkte melden durchweg `#ffffff`, für die gibt es eine
-  Ersatzfarbe je Produktgruppe.
-- **Streckennetz** — Schalter „Strecken" je Verkehrsmittel zeichnet die
-  bekannten Abschnitte je Linie in Linienfarbe (`/api/network`), Filter gilt
-  auch dafür.
-- **Filter** — nach Linien (`1,9,18`), nach Verkehrsmittel, nur Verspätete.
-- **Störungen** — `service_alerts()` mit Koordinaten aus Loc-Referenzen und
-  `himMsgEdgeL[].icoCrd`; Meldungen ohne Geo-Bezug landen in der Liste rechts.
+Fahrzeuge fahren auf echtem Streckenverlauf statt Luftlinie, dazu
+Haltestellen, Linienfarben, Verspätungen, Störungen und Filter nach Linie und
+Verkehrsmittel. Der Verlauf wird im Hintergrund nachgeladen und in
+`data/map_geometry.json` abgelegt, nach einem Neustart steht das Netz sofort;
+Details dazu stehen in `map_server.py`. Gleise der DB-Produkte liegen fertig
+geroutet in `data/rail_geometry.json` im Repo — neu holen per
+`uv run tools/fetch_rail_geometry.py` nur bei Netzänderungen. Diese Datei ist aus
+OpenStreetMap-Daten abgeleitet und steht unter der
+[ODbL](https://opendatacommons.org/licenses/odbl/) — © OpenStreetMap-Mitwirkende.
 
 > ⚠️ Der `ani`-Track gibt `proc` in **Prozent** an, nicht in Promille.
 
@@ -153,37 +117,15 @@ uv run -m timetable.analyze --db timetable.db
 
 ## Was funktioniert
 
-| Feature                                                          | Status                                                                                                   |
-|------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
-| Haltestellensuche (`find_stops`)                                 | ✅                                                                                                       |
-| Umkreissuche (`nearby_stops`)                                    | ⚠️ liefert auch POIs, kein reiner Stop-Filter                                                            |
-| Echtzeit-Abfahrten (`station_board`)                             | ✅ inkl. Soll/Ist-Zeiten                                                                                 |
-| Fahrtausfälle (`isCncl`-Flag)                                    | ⚠️ vorhanden, nicht gegen echten Ausfall verifiziert                                                     |
-| Zwischenhalte einer Fahrt (`journey_details`)                    | ✅                                                                                                       |
-| Verbindungssuche (`trip_search`)                                 | ✅                                                                                                       |
-| Verbindung wiederherstellen (`reconstruct`)                      | ✅ via `Connection.ctx_recon`, frische Echtzeit ohne neue Suche                                          |
-| Alternativen zu einer Verbindung (`trip_alternatives`)           | ✅ via `Connection.ctx_recon`, spätere Verbindungen derselben Relation                                   |
-| Fußweg straßengenau (`walk_route`)                               | ⚠️ nur zu Fußweg-Abschnitten aus `trip_search`; kein freies A-nach-B-Routing                             |
-| Störungsmeldungen (`service_alerts`)                             | ✅ netzweit; `line=` serverseitig, `stop=` client-seitig. `category == 99` = Werbung, selbst rausfiltern |
-| Aktuell betroffene Haltestellen (`affected_stops`)               | ✅ parameterlos                                                                                          |
-| Störungen im Kartenausschnitt (`alerts_in_area`)                 | ⚠️ funktioniert, war für Köln aber immer leer                                                            |
-| Haltestellen-Detail + alle Linien (`stop_details`, `stop_lines`) | ✅ aus dem Fahrplan, nicht nur die nächsten Abfahrten                                                    |
-| Linien im Umkreis (`lines_in_area`)                              | ✅ vollständiger als `stop_details().lines` (inkl. Nachtlinien); Deckel bei 50                           |
-| Isochrone (`reachable_stops`)                                    | ✅ Steige werden auf die Haltestelle zusammengefasst                                                     |
-| Live-Fahrzeugpositionen (`vehicle_positions`)                    | ✅ inkl. Animations-Track, Verspätung, nächster Halt — hochgerechnet, kein GPS                           |
-| Streckenverlauf je Haltestellenpaar (`journey_segments`)         | ✅ viel feiner als `journey_course()`                                                                    |
-| Linienverlauf als Polyline (`journey_course`)                    | ✅ ein Punkt pro Halt, Google-Encoded-Polyline                                                           |
-| Offizielle Linienfarben                                          | ✅ aus `common.icoL`                                                                                     |
-| Liniensuche & -details (`find_lines`, `line_details`)            | ⚠️ inkl. Betreiber und Fahrtenzahl; Pünktlichkeitsstatistik von KVB nicht befüllt                        |
-| Kompletter Linienkatalog (`all_lines`)                           | ✅ 3125 Linien in einem Request, davon 710 `de:vrs` (Köln/Bonn)                                          |
-| Fahrten einer Linie inkl. Verkehrstage (`find_journeys`)         | ✅ `sDaysI` im Klartext                                                                                  |
-| Fahrplanperiode / Serverzeit (`server_info`)                     | ✅                                                                                                       |
-| Push-Abos (`Subscr*`)                                            | ⚠️ brauchen ein Nutzerkonto; einzige schreibende Methoden, bewusst nicht angefasst                       |
-| Historische Daten jeder Art                                      | ❌ kein Archiv — [Details](docs/API.md#historische-daten)                                                |
-| Auslastungsdaten                                                 | ❌ `tcocL` & Co. kommen leer zurück                                                                      |
-| Verbindungs-Optionen (`num`, `via_ext_id`, `products`)           | ✅ Anzahl, Zwischenhalt, Verkehrsmittelfilter über `kvb_hafas.PRODUCTS`                                  |
-| Früher/später blättern (`trip_page`)                             | ✅ `ctx_earlier`/`ctx_later`, wie das „früher/später" der offiziellen Auskunft                           |
-| Tarife/Preise (`Connection.fare_cents`)                          | ✅ Rheinlandtarif-Preisstufe, kommt gratis mit jeder `trip_search()`                                     |
+Abgedeckt sind Haltestellensuche und -details, Echtzeit-Abfahrten,
+Verbindungssuche inkl. Alternativen und Tarifstufe, Störungsmeldungen,
+Isochrone, Live-Fahrzeugpositionen, Streckenverläufe und der komplette
+Linienkatalog — 3125 Linien, davon 710 `de:vrs` (Köln/Bonn).
+
+Nicht zu holen: **historische Daten** jeder Art (kein Archiv) und **Auslastungsdaten** (`tcocL` & Co. kommen leer
+zurück). Push-Abos (`Subscr*`)
+bräuchten ein Nutzerkonto und sind als einzige schreibende Methoden bewusst
+nicht angefasst.
 
 **Vollständige API-Referenz mit allen Feldern, Beispiel-Requests und
 Fehlercodes:** [docs/API.md](docs/API.md) — inklusive
@@ -206,10 +148,12 @@ den KVB-Server nötig.
 
 ## Nächste Schritte / Ideen
 
-- Streckenverläufe zwischen Serverstarts persistieren (sie ändern sich nur mit
-  dem Fahrplan) statt den Cache jedes Mal neu zu füllen.
-- Persistenz/Zeitreihen für eigene Auslastungs-Heuristik (z.B. Ist- vs.
-  Soll-Abweichung über Zeit als Proxy für Verspätungshäufigkeit).
+- Ist-Zeiten mitschreiben: `timetable/` erfasst bisher nur den Soll-Fahrplan (`stop_time` kennt keine Echtzeit-Spalte).
+  Ein wiederkehrender
+  `station_board()`-Lauf in dieselbe DB wäre die Grundlage für eine eigene
+  Zeitreihe.
+- Darauf aufbauend eine eigene Auslastungs-/Pünktlichkeits-Heuristik: Ist- vs.
+  Soll-Abweichung über Zeit als Proxy für Verspätungshäufigkeit.
 
 ## Mitwirken
 
