@@ -90,11 +90,15 @@ Polling alle 15 s (Track reicht 120 s), Antworten 15 s gecacht.
 - **Streckenverlauf statt Luftlinie** — je Linie und Richtung einmal
   `journey_segments_many()`, zu zehnt gebündelt im Hintergrund geholt und in
   `map_geometry.json` gespeichert; nach einem Neustart steht das Netz sofort,
-  beim allerersten Lauf fährt der Rest solange auf der Luftlinie.
+  beim allerersten Lauf fährt der Rest solange auf der Luftlinie. Für DB-Produkte (S-Bahn, RE/RB, IC/ICE) liefert HAFAS
+  nur die Halte selbst — deren Gleise holt
+  `uv run tools/fetch_rail_geometry.py` einmalig aus OpenStreetMap nach
+  `rail_geometry.json`.
 - **Verspätung** — Minuten am nächsten Halt aus `stopL`; ab 3 min gelber Rand
   und Minuten im Label.
-- **Linienfarben** — direkt aus HAFAS (`prodL[].icoX` → `common.icoL[].bg`),
-  keine eigene Farbtabelle.
+- **Linienfarben** — direkt aus HAFAS (`prodL[].icoX` → `common.icoL[].bg`).
+  Ausnahme: DB-Produkte melden durchweg `#ffffff`, für die gibt es eine
+  Ersatzfarbe je Produktgruppe.
 - **Streckennetz** — Schalter „Strecken" zeichnet die bekannten Abschnitte je
   Linie in Linienfarbe (`/api/network`), Filter gilt auch dafür.
 - **Filter** — nach Linien (`1,9,18`), nach Verkehrsmittel, nur Verspätete.

@@ -26,6 +26,9 @@ HOST, PORT = "127.0.0.1", 8000
 MAP_HTML = Path(__file__).with_name("map.html")
 VENDOR_DIR = Path(__file__).with_name("vendor").resolve()  # Leaflet, lokal statt vom CDN
 GEOMETRY_FILE = Path(__file__).with_name("map_geometry.json")
+# Aus OpenStreetMap geroutete Gleisverläufe (tools/fetch_rail_geometry.py). Eigene
+# Datei, damit ein Löschen des HAFAS-Caches die teure Arbeit nicht mitnimmt.
+RAIL_FILE = Path(__file__).with_name("rail_geometry.json")
 CACHE_TTL = 15.0  # s — mehrere Tabs/Reloads sollen die KVB-Infrastruktur nicht doppelt treffen
 ALERT_TTL = 300.0  # s — Störungsmeldungen ändern sich im Minutentakt, nicht im Sekundentakt
 TRACK_SECONDS = 120  # Länge des ani-Tracks, den HAFAS mitliefert
@@ -61,13 +64,33 @@ def _load_geometry() -> None:
     try:
         raw = json.loads(GEOMETRY_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return  # keine oder kaputte Datei — dann eben wieder von vorn
+        raw = {}  # keine oder kaputte Datei — dann eben wieder von vorn
     with _lock:
         _line_meta.update(raw.get("line_meta", {}))
         for line, paths in raw.get("line_paths", {}).items():
             segments = {tuple(key.split("|", 1)): [tuple(point) for point in path] for key, path in paths.items()}
             _line_paths.setdefault(line, {}).update(segments)
             _segments.update(segments)
+    _load_rail_geometry()
+
+
+def _load_rail_geometry() -> None:
+    """OSM-Gleisverläufe über die groben HAFAS-Abschnitte legen.
+
+    Für DB-Produkte liefert HAFAS nur die Halte selbst als Polyline, also
+    Luftlinien. Was tools/fetch_rail_geometry.py aufgelöst hat, ersetzt hier den
+    geraden Abschnitt — überall, wo derselbe Halt-Paar-Schlüssel vorkommt.
+    """
+    try:
+        raw = json.loads(RAIL_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # ohne die Datei bleiben die Luftlinien stehen
+    paths = {tuple(key.split("|", 1)): [tuple(point) for point in path] for key, path in raw.items()}
+    with _lock:
+        _segments.update(paths)
+        for segments in _line_paths.values():
+            for key in segments.keys() & paths.keys():
+                segments[key] = paths[key]
 
 
 def _save_geometry() -> None:
@@ -107,10 +130,22 @@ def _prefetch_geometry() -> None:
             continue  # ein Block weniger im Cache, kein Grund den Worker zu beenden
         with _lock:
             for (_, line), segments in zip(batch, results):
-                _segments.update(segments)
-                _line_paths.setdefault(line, {}).update(segments)
+                _merge_segments(_segments, segments)
+                _merge_segments(_line_paths.setdefault(line, {}), segments)
         if any(results):
             _save_geometry()
+
+
+def _merge_segments(target: dict, new: dict) -> None:
+    """Abschnitte übernehmen, aber nie einen feineren Verlauf durch einen gröberen ersetzen.
+
+    Der Prefetch holt für dieselbe Relation immer wieder die HAFAS-Polyline; für
+    Züge sind das zwei Punkte. Ohne diese Bremse würde jeder Durchlauf die aus
+    OSM gerouteten Gleise wieder plattmachen.
+    """
+    for key, path in new.items():
+        if len(path) >= len(target.get(key, ())):
+            target[key] = path
 
 
 def _queue_routes(vehicles) -> None:
