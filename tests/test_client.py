@@ -995,6 +995,32 @@ def test_journey_segments_splits_polyline_per_stop_pair():
     assert len(segments[("300000200", "300000300")]) == 2
 
 
+def test_journey_segments_many_keeps_positions_aligned_with_jids():
+    client = KVBHafasClient()
+    poly_res = JOURNEYDETAILS_POLYLINE_RESPONSE["svcResL"][0]["res"]
+    batch = {
+        "svcResL": [
+            {"meth": "JourneyDetails", "err": "OK", "res": poly_res},
+            {"meth": "JourneyDetails", "err": "FAIL"},
+        ]
+    }
+    with patch.object(client.session, "post", return_value=_mock_response(batch)) as post:
+        results = client.journey_segments_many(["jid-a", "jid-b"])
+
+    # Ein POST für beide Fahrten, und getPolyline muss mitgehen — sonst kommen
+    # gar keine Abschnitte zurück.
+    assert post.call_count == 1
+    sent = post.call_args.kwargs["json"]["svcReqL"]
+    assert [r["req"] for r in sent] == [
+        {"jid": "jid-a", "getPolyline": True},
+        {"jid": "jid-b", "getPolyline": True},
+    ]
+    # Die kaputte Teil-Antwort wird zu {}, damit die Abschnitte der ersten
+    # Fahrt nicht der Linie der zweiten zugeschlagen werden.
+    assert sorted(results[0]) == [("300000100", "300000200"), ("300000200", "300000300")]
+    assert results[1] == {}
+
+
 def test_vehicle_track_follows_real_geometry_when_segments_are_known():
     # Abschnitt mit einem Knick: die Luftlinie würde die Ecke abschneiden.
     segments = {("300000100", "300000200"): [(50.0, 6.0), (50.0, 6.1), (50.2, 6.1)]}

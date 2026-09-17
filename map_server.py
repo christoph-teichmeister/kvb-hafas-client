@@ -10,6 +10,8 @@ Bounding-Box liefert auch Fahrzeuge anderer Betreiber im Bediengebiet.
 from __future__ import annotations
 
 import json
+import mimetypes
+import os
 import threading
 import time
 from collections import deque
@@ -22,9 +24,15 @@ from kvb_hafas import KVBHafasClient, KVBHafasError
 
 HOST, PORT = "127.0.0.1", 8000
 MAP_HTML = Path(__file__).with_name("map.html")
-CACHE_TTL = 30.0  # s — mehrere Tabs/Reloads sollen die KVB-Infrastruktur nicht doppelt treffen
+VENDOR_DIR = Path(__file__).with_name("vendor").resolve()  # Leaflet, lokal statt vom CDN
+GEOMETRY_FILE = Path(__file__).with_name("map_geometry.json")
+# Aus OpenStreetMap geroutete Gleisverläufe (tools/fetch_rail_geometry.py). Eigene
+# Datei, damit ein Löschen des HAFAS-Caches die teure Arbeit nicht mitnimmt.
+RAIL_FILE = Path(__file__).with_name("rail_geometry.json")
+CACHE_TTL = 15.0  # s — mehrere Tabs/Reloads sollen die KVB-Infrastruktur nicht doppelt treffen
 ALERT_TTL = 300.0  # s — Störungsmeldungen ändern sich im Minutentakt, nicht im Sekundentakt
 TRACK_SECONDS = 120  # Länge des ani-Tracks, den HAFAS mitliefert
+PREFETCH_CHUNK = 10  # Fahrten pro gebündeltem JourneyDetails-Request
 # Default 100 deckelt in Köln sichtbar; ~340 Fahrzeuge sind im Innenstadt-
 # Ausschnitt tatsächlich unterwegs, darüber liefert der Server nicht mehr.
 MAX_VEHICLES = 600
@@ -47,27 +55,97 @@ _routes_queued: set[tuple[str, str]] = set()
 _route_queue: deque[tuple[str, str]] = deque()
 
 
+def _load_geometry() -> None:
+    """Gespeicherte Streckenverläufe einlesen, damit ein Neustart nicht bei null anfängt.
+
+    ponytail: kein TTL, keine Invalidierung — Streckenverläufe ändern sich zum
+    Fahrplanwechsel, nicht täglich. Wer sie neu will, löscht die Datei.
+    """
+    try:
+        raw = json.loads(GEOMETRY_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}  # keine oder kaputte Datei — dann eben wieder von vorn
+    with _lock:
+        _line_meta.update(raw.get("line_meta", {}))
+        for line, paths in raw.get("line_paths", {}).items():
+            segments = {tuple(key.split("|", 1)): [tuple(point) for point in path] for key, path in paths.items()}
+            _line_paths.setdefault(line, {}).update(segments)
+            _segments.update(segments)
+    _load_rail_geometry()
+
+
+def _load_rail_geometry() -> None:
+    """OSM-Gleisverläufe über die groben HAFAS-Abschnitte legen.
+
+    Für DB-Produkte liefert HAFAS nur die Halte selbst als Polyline, also
+    Luftlinien. Was tools/fetch_rail_geometry.py aufgelöst hat, ersetzt hier den
+    geraden Abschnitt — überall, wo derselbe Halt-Paar-Schlüssel vorkommt.
+    """
+    try:
+        raw = json.loads(RAIL_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # ohne die Datei bleiben die Luftlinien stehen
+    paths = {tuple(key.split("|", 1)): [tuple(point) for point in path] for key, path in raw.items()}
+    with _lock:
+        _segments.update(paths)
+        for segments in _line_paths.values():
+            for key in segments.keys() & paths.keys():
+                segments[key] = paths[key]
+
+
+def _save_geometry() -> None:
+    """Streckenverläufe atomar wegschreiben (halbe Datei nach Strg-C wäre schlimmer als keine)."""
+    with _lock:
+        payload = {
+            "line_meta": dict(_line_meta),
+            "line_paths": {
+                line: {f"{a}|{b}": path for (a, b), path in segments.items()} for line, segments in _line_paths.items()
+            },
+        }
+    tmp = GEOMETRY_FILE.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, GEOMETRY_FILE)
+    except OSError:
+        pass  # Cache ist Beschleunigung, kein Zustand — ein Schreibfehler darf nichts kosten
+
+
 def _prefetch_geometry() -> None:
-    """Holt Streckenverläufe für neu gesehene Linie/Richtung-Paare, eins nach dem anderen.
+    """Holt Streckenverläufe für neu gesehene Linie/Richtung-Paare, blockweise.
 
     Ein JourneyDetails-Request pro Linie und Richtung (nicht pro Fahrzeug) —
-    in Köln etwa 150 Stück, die der Rate-Limiter über ein paar Minuten
-    verteilt. Bis dahin fahren die betroffenen Fahrzeuge auf der Luftlinie.
+    in Köln etwa 150 Stück. Die gehen zu PREFETCH_CHUNK gebündelt in einem POST
+    raus, sonst kostet jede einzeln eine Rate-Limit-Pause. Bis eine Relation da
+    ist, fahren die betroffenen Fahrzeuge auf der Luftlinie.
     """
     while True:
         with _lock:
-            queued = _route_queue.popleft() if _route_queue else None
-        if queued is None:
+            batch = [_route_queue.popleft() for _ in range(min(PREFETCH_CHUNK, len(_route_queue)))]
+        if not batch:
             time.sleep(2.0)
             continue
-        jid, line = queued
         try:
-            segments = _client.journey_segments(jid)
+            results = _client.journey_segments_many([jid for jid, _ in batch], chunk=PREFETCH_CHUNK)
         except (KVBHafasError, OSError):
-            continue  # eine Fahrt weniger im Cache, kein Grund den Worker zu beenden
+            continue  # ein Block weniger im Cache, kein Grund den Worker zu beenden
         with _lock:
-            _segments.update(segments)
-            _line_paths.setdefault(line, {}).update(segments)
+            for (_, line), segments in zip(batch, results):
+                _merge_segments(_segments, segments)
+                _merge_segments(_line_paths.setdefault(line, {}), segments)
+        if any(results):
+            _save_geometry()
+
+
+def _merge_segments(target: dict, new: dict) -> None:
+    """Abschnitte übernehmen, aber nie einen feineren Verlauf durch einen gröberen ersetzen.
+
+    Der Prefetch holt für dieselbe Relation immer wieder die HAFAS-Polyline; für
+    Züge sind das zwei Punkte. Ohne diese Bremse würde jeder Durchlauf die aus
+    OSM gerouteten Gleise wieder plattmachen.
+    """
+    for key, path in new.items():
+        if len(path) >= len(target.get(key, ())):
+            target[key] = path
 
 
 def _queue_routes(vehicles) -> None:
@@ -164,6 +242,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/":
             self._send(200, "text/html; charset=utf-8", MAP_HTML.read_bytes())
+        elif url.path.startswith("/vendor/"):
+            self._vendor(url.path[len("/vendor/") :])
         elif url.path == "/api/vehicles":
             self._vehicles_route(parse_qs(url.query).get("bbox", [""])[0])
         elif url.path == "/api/alerts":
@@ -172,6 +252,16 @@ class Handler(BaseHTTPRequestHandler):
             self._guarded(_network)
         else:
             self._json(404, {"error": "not found"})
+
+    def _vendor(self, rel: str) -> None:
+        """Mitgelieferte Leaflet-Dateien ausliefern, unbegrenzt cachebar (Version im Ordner fix)."""
+        path = (VENDOR_DIR / rel).resolve()
+        # Ohne diese Prüfung liefert `/vendor/../map_server.py` den Serverquelltext aus.
+        if not path.is_relative_to(VENDOR_DIR) or not path.is_file():
+            self._json(404, {"error": "not found"})
+            return
+        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        self._send(200, ctype, path.read_bytes(), cache="public, max-age=31536000, immutable")
 
     def _vehicles_route(self, raw_bbox: str) -> None:
         try:
@@ -184,6 +274,8 @@ class Handler(BaseHTTPRequestHandler):
     def _guarded(self, produce) -> None:
         try:
             self._json(200, produce())
+        except (BrokenPipeError, ConnectionResetError):
+            return  # Client (Browser) hat abgebrochen — keine Antwort mehr möglich
         except KVBHafasError as exc:
             self._json(502, {"error": f"HAFAS: {exc}"})
         except OSError as exc:
@@ -192,10 +284,12 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, body: dict) -> None:
         self._send(status, "application/json; charset=utf-8", json.dumps(body).encode())
 
-    def _send(self, status: int, content_type: str, body: bytes) -> None:
+    def _send(self, status: int, content_type: str, body: bytes, cache: str | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if cache:
+            self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(body)
 
@@ -204,6 +298,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    _load_geometry()
     threading.Thread(target=_prefetch_geometry, daemon=True).start()
     print(f"KVB-Livekarte: http://{HOST}:{PORT}  (Strg-C beendet)")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

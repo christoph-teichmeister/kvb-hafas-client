@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KVB live</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<script src="/vendor/leaflet.js"></script>
 <style>
   html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; }
   #map { height: 100%; }
@@ -46,8 +46,9 @@
 <div class="panel" id="status">lade …</div>
 <div class="panel" id="alertlist"></div>
 <script>
-const POLL_MS = 45000;          // Track ist 120 s lang -> läuft nie leer
+const POLL_MS = 15000;          // Track ist 120 s lang -> läuft nie leer
 const ALERT_POLL_MS = 300000;
+const NETWORK_POLL_MS = 60000;  // der Prefetch im Server füllt das Netz nach
 const LATE_FROM = 3;            // ab wie vielen Minuten ein Fahrzeug als verspätet gilt
 
 const map = L.map('map').setView([50.9375, 6.9603], 13);
@@ -63,6 +64,15 @@ const status = document.getElementById('status');
 const alertList = document.getElementById('alertlist');
 const fleet = new Map();        // jid -> {marker, track, servedAt, vehicle, shown}
 let pollTimer = null, moveTimer = null, lastPayload = null;
+
+// HAFAS meldet für alle DB-Produkte '#ffffff' — auf der hellen Karte unsichtbar.
+const CAT_COLOURS = [[/s-?bahn/, '#008d4f'], [/ice|^ic$|fern|tha|flx/, '#ec0016'], [/re|rb|regio|sev/, '#646973']];
+
+function lineColour(colour, category) {
+  if (colour && !/^#f{3,6}$/i.test(colour)) return colour;
+  const c = (category || '').toLowerCase();
+  return (CAT_COLOURS.find(([re]) => re.test(c)) || [null, '#888'])[1];
+}
 
 function cssClass(category) {
   const c = (category || '').toLowerCase();
@@ -91,7 +101,8 @@ function icon(v) {
   const late = v.delay >= LATE_FROM;
   const suffix = late ? ` <span class="d">+${v.delay}</span>` : '';
   // Offizielle Linienfarbe, wenn HAFAS eine mitliefert — sonst die Klassenfarbe.
-  const style = v.colour ? ` style="background:${v.colour};color:${v.text_colour || '#fff'}"` : '';
+  const colour = lineColour(v.colour, v.category);
+  const style = colour ? ` style="background:${colour};color:${v.colour === colour ? (v.text_colour || '#fff') : '#fff'}"` : '';
   return L.divIcon({ className: '', iconSize: null,
     html: `<div class="veh veh-${cssClass(v.category)}${late ? ' late' : ''}"${style}>${v.line}${suffix}</div>` });
 }
@@ -181,7 +192,7 @@ function render(data) {
   status.classList.remove('error');
   const drawn = networkLayer.getLayers().length;
   status.textContent = `${shown.length}/${data.vehicles.length} Fahrzeuge · ${late} verspätet · `
-    + `${geo} Streckenabschnitte bekannt${drawn ? ` (${drawn} gezeichnet)` : ''} · `
+    + `${drawn} von ${geo} Streckenabschnitten gezeichnet (Filter) · `
     + `Stand ${new Date(data.served_at).toLocaleTimeString('de-DE')}`;
 }
 
@@ -217,14 +228,20 @@ async function refreshAlerts() {
 }
 
 async function loadNetwork() {
-  if (networkLines.size) return;
   const res = await fetch('/api/network');
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || res.statusText);
+  networkLines.clear();
   for (const line of data.lines) {
-    const colour = line.colour || '#888';
-    const polylines = line.paths.map(path =>
-      L.polyline(path, { color: colour, weight: 4, opacity: 0.75 }).bindPopup(`Linie ${line.line}`));
+    const colour = lineColour(line.colour, line.category);
+    const polylines = line.paths.map(path => {
+      // Zwei Punkte heißt: HAFAS kennt für diese Relation keinen Verlauf und
+      // tools/fetch_rail_geometry.py hat sie nicht auflösen können. Gestrichelt,
+      // damit die Luftlinie nicht wie ein Gleis aussieht.
+      const schematic = path.length < 3;
+      return L.polyline(path, { color: colour, weight: schematic ? 2 : 4, opacity: 0.75,
+        dashArray: schematic ? '6 6' : null }).bindPopup(`Linie ${line.line}`);
+    });
     networkLines.set(line.line, { polylines, category: line.category });
   }
 }
@@ -238,6 +255,17 @@ function drawNetwork() {
     if (f.lines && !f.lines.includes(name.toLowerCase())) continue;
     entry.polylines.forEach(p => networkLayer.addLayer(p));
   }
+}
+
+async function refreshNetwork() {
+  // Der Server holt Streckenverläufe im Hintergrund nach. Ohne diesen Nachschlag
+  // bliebe die Karte auf dem Stand des Seitenaufrufs stehen.
+  if (!document.getElementById('showNetwork').checked) return;
+  try {
+    await loadNetwork();
+    drawNetwork();
+    if (lastPayload) render(lastPayload);
+  } catch (err) { /* nächster Durchlauf */ }
 }
 
 async function toggleNetwork() {
@@ -267,14 +295,41 @@ function schedule() {
   pollTimer = setInterval(refresh, POLL_MS);
 }
 
+// Filterauswahl über Reloads hinweg merken.
+const PREFS_KEY = 'kvb-map-filters';
+const prefControls = [...document.querySelectorAll('#controls input')];
+const prefKey = el => el.id || `cat:${el.value}`;
+
+function savePrefs() {
+  const prefs = {};
+  for (const el of prefControls) prefs[prefKey(el)] = el.type === 'checkbox' ? el.checked : el.value;
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (err) { /* private mode */ }
+}
+
+function loadPrefs() {
+  let prefs;
+  try { prefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch (err) { return; }
+  for (const el of prefControls) {
+    const v = prefs[prefKey(el)];
+    if (v === undefined) continue;
+    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+  }
+}
+
 document.getElementById('lines').addEventListener('input', refilter);
 document.getElementById('onlyLate').addEventListener('change', refilter);
 document.querySelectorAll('.cat').forEach(c => c.addEventListener('change', refilter));
 document.getElementById('showAlerts').addEventListener('change', toggleAlerts);
 document.getElementById('showNetwork').addEventListener('change', toggleNetwork);
+prefControls.forEach(el => el.addEventListener('change', savePrefs));
+document.getElementById('lines').addEventListener('input', savePrefs);
 map.on('moveend', () => { clearTimeout(moveTimer); moveTimer = setTimeout(schedule, 400); });
-schedule();
+loadPrefs();
+schedule();          // Fahrzeuge zuerst — Strecken/Störungen sind die teuren Nachzügler
+toggleAlerts();
+toggleNetwork();
 setInterval(refreshAlerts, ALERT_POLL_MS);
+setInterval(refreshNetwork, NETWORK_POLL_MS);
 requestAnimationFrame(animate);
 </script>
 </body>

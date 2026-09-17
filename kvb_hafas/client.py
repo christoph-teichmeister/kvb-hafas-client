@@ -834,7 +834,26 @@ class KVBHafasClient:
         Schlüssel sind die Mast-extIds beider Halte, wie sie auch
         JourneyGeoPos in `common.locL` verwendet.
         """
-        res = self._call("JourneyDetails", {"jid": jid, "getPolyline": True})
+        return self._parse_segments(self._call("JourneyDetails", {"jid": jid, "getPolyline": True}))
+
+    def journey_segments_many(self, jids: list[str], chunk: int = 10) -> list[dict[tuple[str, str], list[tuple[float, float]]]]:
+        """Streckenverläufe vieler Fahrten, gebündelt — analog zu journey_routes().
+
+        Ergebnis ist positionsgleich zu `jids`, damit der Aufrufer die
+        Abschnitte weiter der Linie zuordnen kann, zu der er die jid geholt
+        hat. Fahrten, deren Teil-Antwort nicht `OK` ist, liefern `{}` statt
+        den ganzen Block zu kosten.
+        """
+        out: list[dict[tuple[str, str], list[tuple[float, float]]]] = []
+        for start in range(0, len(jids), chunk):
+            batch = jids[start : start + chunk]
+            calls = [("JourneyDetails", {"jid": j, "getPolyline": True}) for j in batch]
+            out.extend({} if res is None else self._parse_segments(res) for res in self._call_many(calls))
+        return out
+
+    @staticmethod
+    def _parse_segments(res: dict[str, Any]) -> dict[tuple[str, str], list[tuple[float, float]]]:
+        """`JourneyDetails`-Antwort mit Polyline in Abschnitte je Haltestellenpaar."""
         common = res.get("common", {})
         poly_l, loc_l = common.get("polyL", []), common.get("locL", [])
         if not poly_l or not poly_l[0].get("ppLocRefL"):

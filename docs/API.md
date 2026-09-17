@@ -256,6 +256,9 @@ Alle Haltestellen, die von einem Startpunkt in X Minuten erreichbar sind.
   deutlich feiner als [`JourneyCourse`](#journeycourse--linienverlauf-als-polyline):
   Linie 18 hat 117 Punkte auf 30 Halte (~4 Stützpunkte je Haltestellenpaar),
   mit `ppLocRefL` als Zuordnung Halt → Punkt.
+- Nur für KVB-eigene Produkte (Bus, Stadtbahn). Für DB-Produkte (S-Bahn, RE, RB,
+  IC/ICE) enthält die Polyline genau einen Punkt je Halt — die Karte holt sich
+  deren Gleisverläufe deshalb per `tools/fetch_rail_geometry.py` aus OSM.
 
 ### JourneyGeoPos — Live-Fahrzeugpositionen
 
