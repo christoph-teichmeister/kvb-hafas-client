@@ -227,3 +227,14 @@ def _prod_colours(prod: dict[str, Any], ico_l: list[dict[str, Any]]) -> tuple[st
     idx = prod.get("icoX")
     ico = ico_l[idx] if idx is not None and 0 <= idx < len(ico_l) else {}
     return _hex_colour(ico.get("bg")), _hex_colour(ico.get("fg"))
+
+
+def _prod_name(prod: dict[str, Any]) -> str:
+    """Anzeigename einer Linie aus einem `prodL`-Eintrag.
+
+    `name` fehlt bei manchen DB-Produkten im Radar (Fern- und Regionalzüge);
+    dort steht die Linie nur in `nameS` oder in `prodCtx` (`line`/`num`). Ohne
+    diesen Fallback bleibt der Marker auf der Karte ohne Label.
+    """
+    ctx = prod.get("prodCtx", {})
+    return prod.get("name") or prod.get("nameS") or ctx.get("line") or ctx.get("num") or ""

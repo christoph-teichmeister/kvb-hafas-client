@@ -43,6 +43,7 @@ from kvb_hafas.parsing import (
     _line_from_prod,
     _mast_steig,
     _prod_colours,
+    _prod_name,
     station_ext_id,
 )
 
@@ -783,7 +784,7 @@ class KVBHafasClient:
             colour, text_colour = _prod_colours(prod, ico_l)
             vehicles.append(
                 Vehicle(
-                    line=prod.get("name", ""),
+                    line=_prod_name(prod),
                     direction=jny.get("dirTxt", ""),
                     lat=pos["y"] / 1_000_000,
                     lon=pos["x"] / 1_000_000,
@@ -844,12 +845,49 @@ class KVBHafasClient:
         hat. Fahrten, deren Teil-Antwort nicht `OK` ist, liefern `{}` statt
         den ganzen Block zu kosten.
         """
-        out: list[dict[tuple[str, str], list[tuple[float, float]]]] = []
+        return [segments for segments, _ in self.journey_details_many(jids, chunk=chunk)]
+
+    def journey_details_many(
+        self, jids: list[str], chunk: int = 10
+    ) -> list[tuple[dict[tuple[str, str], list[tuple[float, float]]], list[Stop]]]:
+        """Streckenverlauf *und* Halte vieler Fahrten aus denselben Requests.
+
+        Dieselbe Antwort trägt beides: die Polyline je Haltestellenpaar und in
+        `common.locL` Name und Koordinate jedes Halts. Wer beides braucht, holt
+        es hier in einem Rutsch statt zweimal dasselbe anzufragen. Ergebnis ist
+        positionsgleich zu `jids`, nicht-`OK`-Teilantworten liefern `({}, [])`.
+        """
+        out: list[tuple[dict[tuple[str, str], list[tuple[float, float]]], list[Stop]]] = []
         for start in range(0, len(jids), chunk):
             batch = jids[start : start + chunk]
             calls = [("JourneyDetails", {"jid": j, "getPolyline": True}) for j in batch]
-            out.extend({} if res is None else self._parse_segments(res) for res in self._call_many(calls))
+            out.extend(
+                ({}, []) if res is None else (self._parse_segments(res), self._parse_stops(res))
+                for res in self._call_many(calls)
+            )
         return out
+
+    @staticmethod
+    def _parse_stops(res: dict[str, Any]) -> list[Stop]:
+        """Halte einer `JourneyDetails`-Antwort mit Name und Koordinate.
+
+        `common.locL` enthält neben den Halten auch Einträge ohne extId oder
+        ohne Koordinate (Richtungstexte etwa) — die fliegen raus.
+        """
+        stops = []
+        for loc in res.get("common", {}).get("locL", []):
+            crd = loc.get("crd") or {}
+            if not loc.get("extId") or "x" not in crd or "y" not in crd:
+                continue
+            stops.append(
+                Stop(
+                    name=loc.get("name", ""),
+                    ext_id=loc["extId"],
+                    lat=crd["y"] / 1_000_000,
+                    lon=crd["x"] / 1_000_000,
+                )
+            )
+        return stops
 
     @staticmethod
     def _parse_segments(res: dict[str, Any]) -> dict[tuple[str, str], list[tuple[float, float]]]:

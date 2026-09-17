@@ -92,15 +92,27 @@ Polling alle 15 s (Track reicht 120 s), Antworten 15 s gecacht.
   `map_geometry.json` gespeichert; nach einem Neustart steht das Netz sofort,
   beim allerersten Lauf fährt der Rest solange auf der Luftlinie. Für DB-Produkte (S-Bahn, RE/RB, IC/ICE) liefert HAFAS
   nur die Halte selbst — deren Gleise holt
-  `uv run tools/fetch_rail_geometry.py` einmalig aus OpenStreetMap nach
-  `rail_geometry.json`.
+  `uv run tools/fetch_rail_geometry.py` aus OpenStreetMap nach
+  `rail_geometry.json`. Fahrten aus der Region hinaus (Düsseldorf, Aachen) werden
+  so weit geroutet, wie das geladene Netz reicht — der Rest bleibt gerade, liegt
+  aber außerhalb der Karte. Erneute Läufe ergänzen nur, was noch fehlt.
+  Gespeichert wird je Haltestellenpaar (nicht je Mast): HAFAS vergibt Mast-IDs
+  pro Fahrt und Bahnsteig, auf Mastebene würde der Verlauf nach jedem Neustart
+  auf neue Paare nicht mehr passen.
+- **Haltestellen** — je Verkehrsmittel zuschaltbar, eingerückt unter der
+  jeweiligen Oberkategorie (die sie beim Abwählen mitnimmt)
+  (`/api/stops`). Abfallprodukt desselben Prefetch: `journey_details_many()`
+  liefert Halte und Streckenverlauf aus einer Antwort, die Produktart kommt von
+  der Linie — also kein einziger zusätzlicher Request. Die Liste wächst wie das
+  Streckennetz mit dem Prefetch; ab Zoom 13 abwärts bleiben die Punkte aus.
 - **Verspätung** — Minuten am nächsten Halt aus `stopL`; ab 3 min gelber Rand
   und Minuten im Label.
 - **Linienfarben** — direkt aus HAFAS (`prodL[].icoX` → `common.icoL[].bg`).
   Ausnahme: DB-Produkte melden durchweg `#ffffff`, für die gibt es eine
   Ersatzfarbe je Produktgruppe.
-- **Streckennetz** — Schalter „Strecken" zeichnet die bekannten Abschnitte je
-  Linie in Linienfarbe (`/api/network`), Filter gilt auch dafür.
+- **Streckennetz** — Schalter „Strecken" je Verkehrsmittel zeichnet die
+  bekannten Abschnitte je Linie in Linienfarbe (`/api/network`), Filter gilt
+  auch dafür.
 - **Filter** — nach Linien (`1,9,18`), nach Verkehrsmittel, nur Verspätete.
 - **Störungen** — `service_alerts()` mit Koordinaten aus Loc-Referenzen und
   `himMsgEdgeL[].icoCrd`; Meldungen ohne Geo-Bezug landen in der Liste rechts.

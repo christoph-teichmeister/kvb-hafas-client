@@ -636,6 +636,20 @@ def test_vehicle_positions_skips_entries_without_position():
     assert (vehicles[0].lat, vehicles[0].lon) == (pytest.approx(50.936296), pytest.approx(6.948068))
 
 
+def test_vehicle_positions_falls_back_to_prodctx_line_name():
+    """DB-Fernverkehr liefert `prodL[].name` leer — sonst bleibt der Marker ohne Label."""
+    response = deepcopy(JOURNEYGEOPOS_RESPONSE)
+    prod = response["svcResL"][0]["res"]["common"]["prodL"][0]
+    prod["name"] = ""
+    prod["prodCtx"]["line"] = "IC 2004"
+
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(response)):
+        vehicles = client.vehicle_positions(50.83, 6.75, 51.05, 7.15)
+
+    assert vehicles[0].line == "IC 2004"
+
+
 def test_vehicle_positions_interpolates_animation_track():
     client = KVBHafasClient()
     with patch.object(client.session, "post", return_value=_mock_response(JOURNEYGEOPOS_RESPONSE)):
@@ -1021,6 +1035,28 @@ def test_journey_segments_many_keeps_positions_aligned_with_jids():
     assert results[1] == {}
 
 
+def test_journey_details_many_returns_stops_with_names_and_coordinates():
+    # Halte kommen aus derselben Antwort wie die Geometrie — das spart der
+    # Karte einen eigenen Request je Linie.
+    payload = deepcopy(JOURNEYDETAILS_POLYLINE_RESPONSE)
+    loc_l = payload["svcResL"][0]["res"]["common"]["locL"]
+    loc_l[0].update({"name": "Neumarkt", "crd": {"x": 6_947_000, "y": 50_936_000}})
+    loc_l[1].update({"name": "Dom/Hbf"})  # ohne crd
+    loc_l[2].update(
+        {"name": "Richtung Merkenich", "extId": "", "crd": {"x": 6_9, "y": 5_0}}
+    )
+
+    client = KVBHafasClient()
+    with patch.object(client.session, "post", return_value=_mock_response(payload)):
+        ((segments, stops),) = client.journey_details_many(["jid-a"])
+
+    assert segments  # die Geometrie bleibt unverändert erhalten
+    # Nur der vollständige Eintrag zählt: ohne Koordinate oder extId kein Halt.
+    assert [(s.ext_id, s.name, s.lat, s.lon) for s in stops] == [
+        ("300000100", "Neumarkt", 50.936, 6.947)
+    ]
+
+
 def test_vehicle_track_follows_real_geometry_when_segments_are_known():
     # Abschnitt mit einem Knick: die Luftlinie würde die Ecke abschneiden.
     segments = {("300000100", "300000200"): [(50.0, 6.0), (50.0, 6.1), (50.2, 6.1)]}
@@ -1043,7 +1079,9 @@ def test_service_alerts_carry_stops_and_coordinates():
 
     assert alerts[0].stops == ("Köln Sportpark Höhenberg",)
     assert alerts[0].points == [(pytest.approx(50.941537), pytest.approx(7.029268))]
-    assert alerts[1].stops == () and alerts[1].points == []  # Aufzugsmeldung ohne Geo-Bezug
+    assert (
+        alerts[1].stops == () and alerts[1].points == []
+    )  # Aufzugsmeldung ohne Geo-Bezug
 
 
 HIMSEARCH_GEO_RESPONSE = {

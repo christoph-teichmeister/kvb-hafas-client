@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from kvb_hafas import KVBHafasClient, KVBHafasError
+from kvb_hafas.parsing import station_ext_id
 
 HOST, PORT = "127.0.0.1", 8000
 MAP_HTML = Path(__file__).with_name("map.html")
@@ -51,7 +52,11 @@ _segments: dict[tuple[str, str], list[tuple[float, float]]] = {}
 # Dieselben Abschnitte, aber nach Linie getrennt — Grundlage für /api/network.
 _line_paths: dict[str, dict[tuple[str, str], list[tuple[float, float]]]] = {}
 _line_meta: dict[str, dict[str, str]] = {}
+# Halte je Mast-extId, Abfallprodukt desselben Prefetch: die JourneyDetails-
+# Antwort trägt in common.locL Name und Koordinate jedes Halts.
+_stops: dict[str, dict] = {}
 _routes_queued: set[tuple[str, str]] = set()
+_prefetch_current: list[str] = []  # Linien im gerade laufenden Block, für die Anzeige
 _route_queue: deque[tuple[str, str]] = deque()
 
 
@@ -71,6 +76,10 @@ def _load_geometry() -> None:
             segments = {tuple(key.split("|", 1)): [tuple(point) for point in path] for key, path in paths.items()}
             _line_paths.setdefault(line, {}).update(segments)
             _segments.update(segments)
+        for ext_id, stop in raw.get("stops", {}).items():
+            entry = _stops.setdefault(ext_id, {**stop, "lines": set(), "cats": set()})
+            entry["lines"].update(stop.get("lines", ()))
+            entry["cats"].update(stop.get("cats", ()))
     _load_rail_geometry()
 
 
@@ -85,12 +94,19 @@ def _load_rail_geometry() -> None:
         raw = json.loads(RAIL_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return  # ohne die Datei bleiben die Luftlinien stehen
-    paths = {tuple(key.split("|", 1)): [tuple(point) for point in path] for key, path in raw.items()}
+    # Die Datei liegt auf Haltestellenebene, die Abschnitte hier auf Mastebene:
+    # dieselbe Relation heißt je Fahrt und Bahnsteig anders (siehe station_ext_id).
+    paths = {key: [tuple(point) for point in path] for key, path in raw.items()}
+
+    def lookup(key: tuple[str, str]) -> list | None:
+        return paths.get("|".join(station_ext_id(part) or part for part in key))
+
     with _lock:
-        _segments.update(paths)
-        for segments in _line_paths.values():
-            for key in segments.keys() & paths.keys():
-                segments[key] = paths[key]
+        for segments in (_segments, *_line_paths.values()):
+            for key in list(segments):
+                path = lookup(key)
+                if path:
+                    segments[key] = path
 
 
 def _save_geometry() -> None:
@@ -100,6 +116,10 @@ def _save_geometry() -> None:
             "line_meta": dict(_line_meta),
             "line_paths": {
                 line: {f"{a}|{b}": path for (a, b), path in segments.items()} for line, segments in _line_paths.items()
+            },
+            "stops": {
+                ext_id: {**stop, "lines": sorted(stop["lines"]), "cats": sorted(stop["cats"])}
+                for ext_id, stop in _stops.items()
             },
         }
     tmp = GEOMETRY_FILE.with_suffix(".json.tmp")
@@ -121,19 +141,23 @@ def _prefetch_geometry() -> None:
     while True:
         with _lock:
             batch = [_route_queue.popleft() for _ in range(min(PREFETCH_CHUNK, len(_route_queue)))]
+            _prefetch_current[:] = sorted({line for _, line in batch if line})
         if not batch:
             time.sleep(2.0)
             continue
         try:
-            results = _client.journey_segments_many([jid for jid, _ in batch], chunk=PREFETCH_CHUNK)
+            results = _client.journey_details_many([jid for jid, _ in batch], chunk=PREFETCH_CHUNK)
         except (KVBHafasError, OSError):
             continue  # ein Block weniger im Cache, kein Grund den Worker zu beenden
         with _lock:
-            for (_, line), segments in zip(batch, results):
+            for (_, line), (segments, stops) in zip(batch, results):
                 _merge_segments(_segments, segments)
                 _merge_segments(_line_paths.setdefault(line, {}), segments)
-        if any(results):
+                _merge_stops(stops, line)
+        if any(segments for segments, _ in results):
             _save_geometry()
+        with _lock:
+            _prefetch_current.clear()
 
 
 def _merge_segments(target: dict, new: dict) -> None:
@@ -146,6 +170,24 @@ def _merge_segments(target: dict, new: dict) -> None:
     for key, path in new.items():
         if len(path) >= len(target.get(key, ())):
             target[key] = path
+
+
+def _merge_stops(stops, line: str) -> None:
+    """Halte der Fahrt vormerken und ihnen Linie und Produktart anheften.
+
+    Die Produktart kommt aus `_line_meta` der Linie, zu der die Fahrt gehört —
+    damit unterscheidet die Karte Bus-, Stadtbahn- und Bahnhalte, ohne dass
+    dafür ein einziger zusätzlicher Request nötig wäre. Ein Halt, den Bus und
+    Stadtbahn bedienen, sammelt beide Kategorien.
+    """
+    category = _line_meta.get(line, {}).get("category", "")
+    for stop in stops:
+        entry = _stops.setdefault(
+            stop.ext_id, {"name": stop.name, "lat": stop.lat, "lon": stop.lon, "lines": set(), "cats": set()}
+        )
+        entry["lines"].add(line)
+        if category:
+            entry["cats"].add(category)
 
 
 def _queue_routes(vehicles) -> None:
@@ -186,6 +228,29 @@ def _network() -> dict:
     return {"lines": lines}
 
 
+def _stops_payload() -> dict:
+    """Bekannte Halte mit Name, Koordinate, Linien und Produktarten.
+
+    Wie /api/network ein Abfallprodukt des Prefetch: was noch nicht geholt
+    wurde, fehlt hier noch. Die Kategorien bleiben roh (HAFAS-`catOut`), die
+    Karte fasst sie selbst zu Bus/Stadtbahn/Bahn zusammen.
+    """
+    with _lock:
+        stops = [
+            {
+                "id": ext_id,
+                "name": stop["name"],
+                "lat": round(stop["lat"], 5),
+                "lon": round(stop["lon"], 5),
+                "lines": sorted(stop["lines"]),
+                "cats": sorted(stop["cats"]),
+            }
+            for ext_id, stop in _stops.items()
+            if stop["lat"] is not None and stop["lon"] is not None
+        ]
+    return {"stops": stops}
+
+
 def _vehicles(bbox: tuple[float, float, float, float]) -> dict:
     """Fahrzeuge in der Box, gecacht. `served_at` verankert den Track im Browser."""
     key = tuple(round(v, 2) for v in bbox)
@@ -196,10 +261,15 @@ def _vehicles(bbox: tuple[float, float, float, float]) -> dict:
         segments = dict(_segments)
     vehicles = _client.vehicle_positions(*bbox, max_vehicles=MAX_VEHICLES, segments=segments)
     _queue_routes(vehicles)
+    with _lock:
+        # Wie viele Linie/Richtung-Paare noch auf ihren Streckenverlauf warten —
+        # daraus macht die Karte ihren Fortschrittsbalken.
+        pending, queued, current = len(_route_queue), len(_routes_queued), list(_prefetch_current)
     payload = {
         "served_at": time.time() * 1000,
         "track_seconds": TRACK_SECONDS,
         "known_segments": len(segments),
+        "prefetch": {"pending": pending, "queued": queued, "current": current},
         "vehicles": [asdict(v) for v in vehicles],
     }
     with _lock:
@@ -250,6 +320,8 @@ class Handler(BaseHTTPRequestHandler):
             self._guarded(_service_alerts)
         elif url.path == "/api/network":
             self._guarded(_network)
+        elif url.path == "/api/stops":
+            self._guarded(_stops_payload)
         else:
             self._json(404, {"error": "not found"})
 
