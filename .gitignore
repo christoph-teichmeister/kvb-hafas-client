@@ -9,10 +9,9 @@ venv/
 # Erfasste Fahrplan-Datenbanken
 *.db
 
-# Streckengeometrie-Cache der Live-Karte
-map_geometry.json
-map_geometry.json.tmp
+# Streckengeometrie-Cache der Live-Karte (baut sich im Betrieb selbst auf)
+data/map_geometry.json
+data/map_geometry.json.tmp
 
-# OSM-Rohdaten und daraus geroutete Gleisverläufe
+# OSM-Rohdaten; die daraus gerouteten Gleisverläufe liegen getrackt in data/
 .cache/
-rail_geometry.json

@@ -4,7 +4,7 @@ HAFAS liefert für DB-Produkte nur die Halte selbst als Polyline (S19: 16 Punkte
 auf 16 Halte), also Luftlinien quer über die Karte. Straßenbahn und Bus bekommen
 dagegen echte Stützpunkte. Dieses Skript füllt die Lücke: Schienennetz einmal per
 Overpass holen, jedes Haltestellenpaar darauf routen und das Ergebnis nach
-rail_geometry.json schreiben. map_server.py legt die Pfade beim Start über die
+data/rail_geometry.json schreiben. map_server.py legt die Pfade beim Start über die
 groben HAFAS-Abschnitte.
 
 Einmalig von Hand laufen lassen — Gleise ändern sich seltener als Fahrpläne.
@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from kvb_hafas.parsing import station_ext_id  # noqa: E402  (erst nach dem Pfad-Setup importierbar)
-GEOMETRY_FILE = ROOT / "map_geometry.json"
-RAIL_FILE = ROOT / "rail_geometry.json"
+GEOMETRY_FILE = ROOT / "data" / "map_geometry.json"
+RAIL_FILE = ROOT / "data" / "rail_geometry.json"
 OSM_CACHE_DIR = ROOT / ".cache"
 
 # Nur der Kartenausschnitt plus Rand. Die gecachten Abschnitte reichen von Paris

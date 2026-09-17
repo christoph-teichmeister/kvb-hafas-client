@@ -26,10 +26,11 @@ from kvb_hafas.parsing import station_ext_id
 HOST, PORT = "127.0.0.1", 8000
 MAP_HTML = Path(__file__).with_name("map.html")
 VENDOR_DIR = Path(__file__).with_name("vendor").resolve()  # Leaflet, lokal statt vom CDN
-GEOMETRY_FILE = Path(__file__).with_name("map_geometry.json")
+DATA_DIR = Path(__file__).parent / "data"
+GEOMETRY_FILE = DATA_DIR / "map_geometry.json"
 # Aus OpenStreetMap geroutete Gleisverläufe (tools/fetch_rail_geometry.py). Eigene
 # Datei, damit ein Löschen des HAFAS-Caches die teure Arbeit nicht mitnimmt.
-RAIL_FILE = Path(__file__).with_name("rail_geometry.json")
+RAIL_FILE = DATA_DIR / "rail_geometry.json"
 CACHE_TTL = 15.0  # s — mehrere Tabs/Reloads sollen die KVB-Infrastruktur nicht doppelt treffen
 ALERT_TTL = 300.0  # s — Störungsmeldungen ändern sich im Minutentakt, nicht im Sekundentakt
 TRACK_SECONDS = 120  # Länge des ani-Tracks, den HAFAS mitliefert

@@ -89,16 +89,19 @@ Polling alle 15 s (Track reicht 120 s), Antworten 15 s gecacht.
 
 - **Streckenverlauf statt Luftlinie** — je Linie und Richtung einmal
   `journey_segments_many()`, zu zehnt gebündelt im Hintergrund geholt und in
-  `map_geometry.json` gespeichert; nach einem Neustart steht das Netz sofort,
+  `data/map_geometry.json` gespeichert; nach einem Neustart steht das Netz sofort,
   beim allerersten Lauf fährt der Rest solange auf der Luftlinie. Für DB-Produkte (S-Bahn, RE/RB, IC/ICE) liefert HAFAS
-  nur die Halte selbst — deren Gleise holt
-  `uv run tools/fetch_rail_geometry.py` aus OpenStreetMap nach
-  `rail_geometry.json`. Fahrten aus der Region hinaus (Düsseldorf, Aachen) werden
+  nur die Halte selbst — deren Gleise liegen fertig geroutet in
+  `data/rail_geometry.json` und sind mit im Repo, das Nachholen per
+  `uv run tools/fetch_rail_geometry.py` aus OpenStreetMap braucht es also nur bei
+  Netzänderungen. Fahrten aus der Region hinaus (Düsseldorf, Aachen) werden
   so weit geroutet, wie das geladene Netz reicht — der Rest bleibt gerade, liegt
   aber außerhalb der Karte. Erneute Läufe ergänzen nur, was noch fehlt.
   Gespeichert wird je Haltestellenpaar (nicht je Mast): HAFAS vergibt Mast-IDs
   pro Fahrt und Bahnsteig, auf Mastebene würde der Verlauf nach jedem Neustart
-  auf neue Paare nicht mehr passen.
+  auf neue Paare nicht mehr passen. `data/rail_geometry.json` ist aus
+  OpenStreetMap-Daten abgeleitet und steht damit unter der
+  [ODbL](https://opendatacommons.org/licenses/odbl/) — © OpenStreetMap-Mitwirkende.
 - **Haltestellen** — je Verkehrsmittel zuschaltbar, eingerückt unter der
   jeweiligen Oberkategorie (die sie beim Abwählen mitnimmt)
   (`/api/stops`). Abfallprodukt desselben Prefetch: `journey_details_many()`
