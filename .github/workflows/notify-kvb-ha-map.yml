@@ -1,0 +1,21 @@
+name: Notify kvb-ha-map
+
+# kvb-ha-map depends on this repo as an unpinned git dependency
+# (kvb-hafas-client @ git+https://github.com/.../kvb-hafas-client.git, no rev/tag).
+# Every push to main can move that dependency forward, so ping kvb-ha-map to
+# re-lock and release rather than let it silently drift out of date.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch to kvb-ha-map
+        env:
+          GH_TOKEN: ${{ secrets.KVB_HA_MAP_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/christoph-teichmeister/kvb-ha-map/dispatches \
+            -f event_type=kvb-hafas-client-updated \
+            -f "client_payload[sha]=${{ github.sha }}"
