@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KVB Departures</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="app-header">
+  <a class="brand" href="index.html"><span class="dot"></span>KVB Live</a>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="map.html">Map</a>
+    <a href="departures.html" class="active">Abfahrten</a>
+    <a href="dashboard.html">Dashboard</a>
+  </nav>
+</header>
+<main>
+  <h1>Abfahrten</h1>
+
+  <h2>Haltestelle suchen</h2>
+  <div class="search">
+    <input type="text" id="query" placeholder="z.B. Neumarkt">
+    <button id="searchBtn">Suchen</button>
+  </div>
+  <ul class="stops" id="results"></ul>
+
+  <h2>Favoriten</h2>
+  <ul class="stops" id="favorites"></ul>
+
+  <h2>Abfahrtstafel</h2>
+  <div id="board" class="board-group"><div class="led-board"><div class="led-empty">Haltestelle suchen oder Favorit oben auswählen.</div></div></div>
+</main>
+<script>
+const FAV_KEY = 'kvb-departures-favorites';
+const FAV_NAMES_KEY = 'kvb-departures-favorite-names';
+const WEEKDAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+let cfg = { favorite_stop_ids: [] };
+let currentStopId = null, currentStopName = null;
+let boardTimer = null, countdownTimer = null, clockTimer = null;
+let boardDepartures = [];
+
+function loadLocalFavs() {
+  try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
+}
+function saveLocalFavs(list) {
+  try { localStorage.setItem(FAV_KEY, JSON.stringify(list)); } catch { /* private mode */ }
+}
+function loadFavNames() {
+  try { return JSON.parse(localStorage.getItem(FAV_NAMES_KEY) || '{}'); } catch { return {}; }
+}
+function saveFavName(id, name) {
+  const names = loadFavNames();
+  names[id] = name;
+  try { localStorage.setItem(FAV_NAMES_KEY, JSON.stringify(names)); } catch { /* private mode */ }
+}
+
+function favIds() {
+  // Union of add-on-configured favorites and ones the browser has starred locally.
+  return new Set([...(cfg.favorite_stop_ids || []), ...loadLocalFavs()]);
+}
+
+function toggleFav(id, name) {
+  const local = new Set(loadLocalFavs());
+  if (local.has(id)) local.delete(id); else { local.add(id); saveFavName(id, name); }
+  saveLocalFavs([...local]);
+  renderFavorites();
+  renderResultsCache();
+}
+
+let lastResults = [];
+
+function renderResultsCache() {
+  renderStopList(document.getElementById('results'), lastResults);
+}
+
+function renderStopList(container, stops) {
+  const favs = favIds();
+  container.innerHTML = '';
+  for (const s of stops) {
+    const li = document.createElement('li');
+    li.addEventListener('click', () => loadBoard(s.ext_id, s.name));
+    const label = document.createElement('span');
+    label.textContent = s.name;
+    label.title = `ext_id: ${s.ext_id} (für die favorite_stop_ids-Option)`;
+    const id = document.createElement('span');
+    id.className = 'stop-id';
+    id.textContent = s.ext_id;
+    const star = document.createElement('span');
+    star.className = 'fav' + (favs.has(s.ext_id) ? ' active' : '');
+    star.textContent = favs.has(s.ext_id) ? '★' : '☆';
+    star.title = 'Favorit umschalten';
+    star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(s.ext_id, s.name); });
+    li.appendChild(label);
+    li.appendChild(id);
+    li.appendChild(star);
+    container.appendChild(li);
+  }
+}
+
+async function search() {
+  const q = document.getElementById('query').value.trim();
+  const results = document.getElementById('results');
+  if (!q) { results.innerHTML = ''; return; }
+  results.innerHTML = '<li class="empty">suche …</li>';
+  try {
+    const res = await fetch(`api/stops/search?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    lastResults = data.stops || [];
+    renderResultsCache();
+    if (!lastResults.length) results.innerHTML = '<li class="empty">keine Treffer</li>';
+  } catch (err) {
+    results.innerHTML = `<li class="err">${err.message}</li>`;
+  }
+}
+
+async function resolveMissingFavNames(ids) {
+  const names = loadFavNames();
+  const missing = ids.filter((id) => !names[id]);
+  if (!missing.length) return names;
+  await Promise.all(missing.map(async (id) => {
+    try {
+      const res = await fetch(`api/stops/details?ext_id=${encodeURIComponent(id)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.name) { names[id] = data.name; saveFavName(id, data.name); }
+    } catch (err) { /* keep showing the id */ }
+  }));
+  return names;
+}
+
+async function renderFavorites() {
+  const container = document.getElementById('favorites');
+  const ids = [...favIds()];
+  if (!ids.length) { container.innerHTML = '<li class="empty">noch keine Favoriten — Haltestelle oben markieren</li>'; return; }
+  const names = await resolveMissingFavNames(ids);
+  container.innerHTML = '';
+  for (const id of ids) {
+    const li = document.createElement('li');
+    li.addEventListener('click', () => loadBoard(id, names[id] || id));
+    const label = document.createElement('span');
+    label.textContent = names[id] || id;
+    const star = document.createElement('span');
+    star.className = 'fav active';
+    star.textContent = '★';
+    star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(id, names[id] || id); });
+    li.appendChild(label);
+    li.appendChild(star);
+    container.appendChild(li);
+  }
+}
+
+function fmtTime(hafas) {
+  if (!hafas) return '—';
+  const t = hafas.slice(-6);
+  return `${t.slice(0, 2)}:${t.slice(2, 4)}`;
+}
+
+function minutesUntil(hafas) {
+  if (!hafas || hafas.length < 4) return null;
+  const now = new Date();
+  const h = parseInt(hafas.slice(-6, -4), 10), m = parseInt(hafas.slice(-4, -2), 10);
+  const target = new Date(now);
+  target.setHours(h, m, 0, 0);
+  let diff = Math.round((target - now) / 60000);
+  if (diff < -60) diff += 1440;
+  return diff;
+}
+
+function headDate() {
+  const now = new Date();
+  const dd = String(now.getDate()).padStart(2, '0');
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  return `${WEEKDAYS[now.getDay()]} ${dd}.${mm}.${now.getFullYear()}`;
+}
+function headClock() {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+}
+
+function renderBoard(data) {
+  const board = document.getElementById('board');
+  boardDepartures = data.departures || [];
+  board.innerHTML = `<div class="led-strip"><span id="ledDate">${headDate()}</span></div>
+    <div id="boardPlatforms"></div>
+    <div class="led-board" id="boardTickerWrap"><div id="boardTicker"></div></div>`;
+  renderBoardRows();
+  clearInterval(clockTimer);
+  clockTimer = setInterval(() => {
+    document.querySelectorAll('.led-clock').forEach(c => { c.textContent = headClock(); });
+  }, 1000);
+  loadTicker();
+}
+
+function groupByPlatform(deps) {
+  const groups = new Map();
+  for (const d of deps) {
+    const key = d.platform ? String(d.platform) : '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d);
+  }
+  return [...groups.entries()].sort(([a], [b]) => {
+    if (a === '') return 1;
+    if (b === '') return -1;
+    const na = parseInt(a, 10), nb = parseInt(b, 10);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+}
+
+function renderBoardRows() {
+  const container = document.getElementById('boardPlatforms');
+  if (!container) return;
+  if (!boardDepartures.length) { container.innerHTML = '<div class="led-board"><div class="led-empty">keine Abfahrten</div></div>'; return; }
+  container.innerHTML = groupByPlatform(boardDepartures).map(([platform, deps]) => {
+    const rows = deps.map(d => {
+      const eta = minutesUntil(d.realtime || d.planned);
+      const etaText = d.cancelled ? 'Entfällt' : eta === null ? '—' : eta <= 0 ? 'Sofort' : `${eta} Min`;
+      return `<div class="led-row${d.cancelled ? ' cancelled' : ''}">
+        <span class="led-num">${d.line}</span>
+        <span class="led-dest">${d.direction}</span>
+        <span class="led-eta">${etaText}</span>
+      </div>`;
+    }).join('');
+    const label = platform ? `Steig ${platform}` : 'Ohne Steig-Angabe';
+    return `<div class="led-board">
+      <div class="led-head"><span>${label}</span><span class="led-clock">${headClock()}</span></div>
+      ${rows}
+    </div>`;
+  }).join('');
+}
+
+async function loadTicker() {
+  const wrap = document.getElementById('boardTickerWrap');
+  const box = document.getElementById('boardTicker');
+  if (!box || !wrap) return;
+  try {
+    const res = await fetch('api/alerts');
+    if (!res.ok) { wrap.style.display = 'none'; return; }
+    const data = await res.json();
+    const relevant = (data.alerts || []).filter(a => !currentStopId || !a.stops?.length || a.stops.includes(currentStopId));
+    const text = relevant.map(a => a.text).filter(Boolean).join('   •   ');
+    if (!text) { wrap.style.display = 'none'; return; }
+    const duration = Math.max(16, text.length * 0.25);
+    wrap.style.display = '';
+    box.innerHTML = `<div class="led-ticker"><span class="track" style="animation-duration:${duration}s">${text}</span></div>`;
+  } catch (err) {
+    wrap.style.display = 'none';
+  }
+}
+
+async function refreshBoard() {
+  if (!currentStopId) return;
+  try {
+    const res = await fetch(`api/departures?stop_id=${encodeURIComponent(currentStopId)}&max=15`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    boardDepartures = data.departures || [];
+    renderBoardRows();
+  } catch (err) {
+    document.getElementById('board').innerHTML = `<div class="err">${err.message}</div>`;
+  }
+}
+
+function loadBoard(id, name) {
+  currentStopId = id;
+  currentStopName = name;
+  clearInterval(boardTimer);
+  clearInterval(countdownTimer);
+  clearInterval(clockTimer);
+  document.getElementById('board').innerHTML = '<div class="skeleton" style="height:140px;background:#050505"></div>';
+  renderBoard({ departures: [] });
+  refreshBoard();
+  boardTimer = setInterval(refreshBoard, 30000);
+  countdownTimer = setInterval(renderBoardRows, 15000);
+}
+
+async function init() {
+  try {
+    const res = await fetch('api/config');
+    if (res.ok) cfg = await res.json();
+  } catch (err) { /* defaults */ }
+  renderFavorites();
+  document.getElementById('searchBtn').addEventListener('click', search);
+  document.getElementById('query').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+}
+
+init();
+</script>
+</body>
+</html>

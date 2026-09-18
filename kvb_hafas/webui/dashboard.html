@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KVB Dashboard</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="app-header">
+  <a class="brand" href="index.html"><span class="dot"></span>KVB Live</a>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="map.html">Map</a>
+    <a href="departures.html">Abfahrten</a>
+    <a href="dashboard.html" class="active">Dashboard</a>
+  </nav>
+</header>
+<main>
+  <h1>Dashboard</h1>
+  <p class="subtitle"><span class="live-dot" id="liveDot" style="display:none"></span> <span id="liveLabel">Live</span></p>
+
+  <h2>Live</h2>
+  <div class="stat-grid" id="liveTiles">
+    <div class="stat-row"><div class="skeleton stat-skeleton"></div></div>
+    <div class="stat-row"><div class="skeleton stat-skeleton"></div></div>
+    <div class="stat-row"><div class="skeleton stat-skeleton"></div></div>
+    <div class="stat-row"><div class="skeleton stat-skeleton"></div></div>
+  </div>
+
+  <h2>Verspätungen (historisch)</h2>
+  <div class="stat-grid" id="delayTiles"></div>
+  <h2>Unpünktlichste Linien</h2>
+  <div id="leastPunctual"></div>
+  <div class="note" id="historyNote"></div>
+</main>
+<script>
+let refreshSeconds = 15;
+
+function statRow(value, label, trend) {
+  const t = trend ? `<span class="trend ${trend > 0 ? 'up' : 'down'}">${trend > 0 ? '▲' : '▼'}${Math.abs(trend)}</span>` : '';
+  return `<div class="stat-row"><span class="label">${label}</span><span class="value">${value}${t}</span></div>`;
+}
+
+let prevDelayed = null;
+
+async function refreshLive() {
+  const box = document.getElementById('liveTiles');
+  const dot = document.getElementById('liveDot');
+  const label = document.getElementById('liveLabel');
+  try {
+    const res = await fetch('api/stats/live');
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || res.statusText);
+    dot.style.display = 'inline-block';
+    label.textContent = `Live — aktualisiert alle ${refreshSeconds}s`;
+    const trend = prevDelayed === null ? null : d.delayed_vehicle_count - prevDelayed;
+    prevDelayed = d.delayed_vehicle_count;
+    box.innerHTML = [
+      statRow(d.vehicle_count, 'Fahrzeuge im Sichtbereich'),
+      statRow(d.local_vehicle_count, 'davon KVB Bahn/Bus'),
+      statRow(d.busiest_line ?? '—', 'meist befahrene Linie'),
+      statRow(d.max_current_delay_minutes ?? '—', 'max. Verspätung (Min)'),
+      statRow(d.delayed_vehicle_count, `verspätet ≥${d.delayed_threshold_minutes}min`, trend),
+      statRow(d.vehicles_with_realtime, 'mit Echtzeitdaten'),
+    ].join('');
+  } catch (err) {
+    dot.style.display = 'none';
+    label.textContent = '';
+    box.innerHTML = `<div class="err">${err.message}</div>`;
+  }
+}
+
+function rateBar(rate) {
+  const pct = rate * 100;
+  const cls = pct < 70 ? 'low' : pct < 90 ? 'mid' : '';
+  return `<div class="rate-bar"><div class="bar"><span class="${cls}" style="width:${pct.toFixed(0)}%"></span></div><span class="pct">${pct.toFixed(1)}%</span></div>`;
+}
+
+async function refreshDelays() {
+  const box = document.getElementById('delayTiles');
+  const table = document.getElementById('leastPunctual');
+  const note = document.getElementById('historyNote');
+  try {
+    const res = await fetch('api/stats/delays');
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || res.statusText);
+    if (d.error === 'history disabled') {
+      note.textContent = 'Verlauf ist deaktiviert (history_enabled=false) — keine historischen Statistiken verfügbar.';
+      box.innerHTML = '';
+      table.innerHTML = '';
+      return;
+    }
+    note.textContent = '';
+    box.innerHTML = [
+      statRow(d.max_delay_minutes ?? '—', 'max. beobachtete Verspätung (Min)'),
+      statRow(d.lines ? d.lines.length : 0, 'beobachtete Linien'),
+    ].join('');
+    const rows = (d.least_punctual_lines || []).map(l =>
+      `<tr><td>${l.line}</td><td>${rateBar(l.punctuality_rate)}</td>
+       <td class="num">${l.avg_delay_minutes ?? '—'}</td><td class="num">${l.observations}</td></tr>`
+    ).join('');
+    table.innerHTML = rows
+      ? `<table><thead><tr><th>Linie</th><th>Pünktlichkeit</th><th class="num">Ø Verspätung (Min)</th><th class="num">Messungen</th></tr></thead>
+         <tbody>${rows}</tbody></table>`
+      : '<div class="empty">noch nicht genug Verlaufsdaten</div>';
+  } catch (err) {
+    box.innerHTML = `<div class="err">${err.message}</div>`;
+    table.innerHTML = '';
+  }
+}
+
+function refreshAll() {
+  refreshLive();
+  refreshDelays();
+}
+
+async function init() {
+  try {
+    const res = await fetch('api/config');
+    if (res.ok) {
+      const cfg = await res.json();
+      refreshSeconds = cfg.dashboard_refresh_seconds || 15;
+    }
+  } catch (err) { /* defaults */ }
+  refreshAll();
+  setInterval(refreshAll, refreshSeconds * 1000);
+}
+
+init();
+</script>
+</body>
+</html>
