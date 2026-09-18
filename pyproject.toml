@@ -22,3 +22,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kvb_hafas"]
+# non-.py webui assets (HTML/CSS/vendored Leaflet) aren't picked up by hatchling's
+# default .py-only package scan, so list them explicitly.
+artifacts = [
+    "kvb_hafas/webui/*.html",
+    "kvb_hafas/webui/*.css",
+    "kvb_hafas/webui/vendor/*.css",
+    "kvb_hafas/webui/vendor/*.js",
+    "kvb_hafas/webui/vendor/images/*.png",
+]

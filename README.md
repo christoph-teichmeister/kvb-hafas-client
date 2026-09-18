@@ -65,27 +65,21 @@ Störungsmeldungen, Isochrone, Live-Fahrzeuge, Liniendetails, Serverinfo:
 uv run main.py
 ```
 
-Live-Karte im Browser — alle Fahrzeuge im Kartenausschnitt, animiert aus den
-`ani`-Tracks von `vehicle_positions()`:
+Live-Karte, Haltestellen-Board und Verspätungs-Statistiken im Browser — die
+volle Web-UI lebt nicht mehr in diesem Repo, sondern im
+[kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map) Home
+Assistant Add-on, das diese Library als Dependency zieht. Dieses Repo liefert
+die UI-Assets nur noch als Package-Daten mit: `kvb_hafas/webui/` enthält die
+vier HTML-Seiten (`index.html`, `map.html`, `departures.html`,
+`dashboard.html`), `shared.css`, vendored Leaflet (`vendor/`) sowie
+`is_kvb_local.py` (Bucketing-Helfer für lokale vs. durchfahrende Linien) — zum
+lokalen Ausprobieren siehe stattdessen `kvb-ha-map`.
 
-```bash
-uv run map_server.py   # -> http://localhost:8000
-```
-
-`map_server.py` (nur stdlib) ist ein dünner Proxy vor `vehicle_positions()`,
-`map.html` nutzt Leaflet aus `vendor/` (lokal, damit die Karte ohne CDN-Roundtrip
-sofort steht) und OpenStreetMap-Tiles vom CDN. Ausschnitt folgt der Karte,
-Polling alle 15 s (Track reicht 120 s), Antworten 15 s gecacht.
-
-Fahrzeuge fahren auf echtem Streckenverlauf statt Luftlinie, dazu
-Haltestellen, Linienfarben, Verspätungen, Störungen und Filter nach Linie und
-Verkehrsmittel. Der Verlauf wird im Hintergrund nachgeladen und in
-`data/map_geometry.json` abgelegt, nach einem Neustart steht das Netz sofort;
-Details dazu stehen in `map_server.py`. Gleise der DB-Produkte liegen fertig
-geroutet in `data/rail_geometry.json` im Repo — neu holen per
-`uv run tools/fetch_rail_geometry.py` nur bei Netzänderungen. Diese Datei ist aus
-OpenStreetMap-Daten abgeleitet und steht unter der
-[ODbL](https://opendatacommons.org/licenses/odbl/) — © OpenStreetMap-Mitwirkende.
+Gleise der DB-Produkte liegen fertig geroutet in `data/rail_geometry.json` im
+Repo — neu holen per `uv run tools/fetch_rail_geometry.py` nur bei
+Netzänderungen. Diese Datei ist aus OpenStreetMap-Daten abgeleitet und steht
+unter der [ODbL](https://opendatacommons.org/licenses/odbl/) — ©
+OpenStreetMap-Mitwirkende.
 
 > ⚠️ Der `ani`-Track gibt `proc` in **Prozent** an, nicht in Promille.
 
@@ -106,9 +100,10 @@ cli/            Interaktive Terminal-Oberfläche (questionary + rich)
   departures.py / trips.py / alerts.py / geo.py / network.py   je ein Menüpunkt
 timetable/      Fahrplan-Erhebung: fetch.py (einsammeln), analyze.py + analyze.sql (auswerten)
 main.py         Entry-Point der CLI
-map_server.py   stdlib-Server für die Live-Karte
-map.html        Live-Karte (Leaflet, pollt map_server.py)
-vendor/         Leaflet 1.9.4 lokal (leaflet.js/css + Marker-Images)
+kvb_hafas/webui/  UI-Assets fürs kvb-ha-map Add-on (Package-Daten, kein eigener Server hier)
+  index.html, map.html, departures.html, dashboard.html, shared.css
+  is_kvb_local.py   Bucketing-Helfer: lokale (Tram/Bus) vs. durchfahrende Linien
+  vendor/           Leaflet 1.9.4 lokal (leaflet.js/css + Marker-Images)
 ```
 
 Fahrplan eines Betriebstags einsammeln und auswerten:
