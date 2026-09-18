@@ -8,6 +8,9 @@ Inoffizieller Python-Client für die Echtzeit-Fahrplandaten der **KVB** (Kölner
 Verkehrs-Betriebe AG), Köln — Haltestellensuche, Live-Abfahrten, Verbindungen
 und Störungsmeldungen, ohne offizielle API.
 
+Ein Kartenfrontend, das diesen Client nutzt, gibt es unter
+[kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map).
+
 ## Hintergrund
 
 Die KVB betreibt keine offizielle öffentliche API. Dieses Projekt spricht
