@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute new CalVer version
+        id: version
+        run: |
+          set -euo pipefail
+          prefix="$(date -u +%Y.%-m)"
+          mapfile -t existing < <(git tag -l "${prefix}.*" | sort -t. -k3 -n)
+          patch="${#existing[@]}"
+          new_version="${prefix}.${patch}"
+          echo "prefix=${prefix}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${new_version}" >> "$GITHUB_OUTPUT"
+          echo "New version: ${new_version}"
+
+      - name: Build changelog entry
+        id: changelog
+        run: |
+          set -euo pipefail
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -n "${last_tag}" ]; then
+            range="${last_tag}..HEAD"
+          else
+            range="HEAD"
+          fi
+
+          feat=() fix=() docs=() other=()
+          while IFS= read -r subject; do
+            [ -z "${subject}" ] && continue
+            case "${subject}" in
+              feat:*|feat\(*\):*) feat+=("${subject#*: }") ;;
+              fix:*|fix\(*\):*) fix+=("${subject#*: }") ;;
+              docs:*|docs\(*\):*) docs+=("${subject#*: }") ;;
+              *) other+=("${subject}") ;;
+            esac
+          done < <(git log ${range} --no-merges --pretty=format:%s)
+
+          {
+            echo "## [${{ steps.version.outputs.new_version }}] - $(date -u +%Y-%m-%d)"
+            echo
+            if [ "${#feat[@]}" -gt 0 ]; then
+              echo "### Features"
+              for l in "${feat[@]}"; do echo "- ${l}"; done
+              echo
+            fi
+            if [ "${#fix[@]}" -gt 0 ]; then
+              echo "### Fixes"
+              for l in "${fix[@]}"; do echo "- ${l}"; done
+              echo
+            fi
+            if [ "${#docs[@]}" -gt 0 ]; then
+              echo "### Docs"
+              for l in "${docs[@]}"; do echo "- ${l}"; done
+              echo
+            fi
+            if [ "${#other[@]}" -gt 0 ]; then
+              echo "### Other"
+              for l in "${other[@]}"; do echo "- ${l}"; done
+              echo
+            fi
+          } > /tmp/changelog-entry.md
+
+          cat /tmp/changelog-entry.md
+
+      - name: Update CHANGELOG.md
+        run: |
+          set -euo pipefail
+          if [ ! -f CHANGELOG.md ]; then
+            printf '# Changelog\n\nAll notable changes to this project are documented in this file.\n\n' > CHANGELOG.md
+          fi
+          header_lines=4
+          { head -n "${header_lines}" CHANGELOG.md; echo; cat /tmp/changelog-entry.md; tail -n +$((header_lines + 1)) CHANGELOG.md; } > /tmp/CHANGELOG.md.new
+          mv /tmp/CHANGELOG.md.new CHANGELOG.md
+
+      - name: Bump pyproject.toml version
+        run: |
+          set -euo pipefail
+          sed -i -E "s/^version = \".*\"\$/version = \"${{ steps.version.outputs.new_version }}\"/" pyproject.toml
+          grep -m1 '^version = ' pyproject.toml
+
+      - name: Commit release changes
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md pyproject.toml
+          git commit -m "chore(release): ${{ steps.version.outputs.new_version }} [skip release]"
+          git push origin HEAD:main
+
+      - name: Tag release
+        run: |
+          set -euo pipefail
+          git tag "${{ steps.version.outputs.new_version }}"
+          git push origin "${{ steps.version.outputs.new_version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.version.outputs.new_version }}" \
+            --title "${{ steps.version.outputs.new_version }}" \
+            --notes-file /tmp/changelog-entry.md
