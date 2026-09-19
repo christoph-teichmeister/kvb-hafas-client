@@ -19,6 +19,12 @@
   .veh-rail { background: #444; }
   .veh.late { border-color: #fc0; box-shadow: 0 0 0 2px #fc0, 0 1px 4px rgba(0,0,0,.4); }
   .veh.highlight { border-color: #0af; box-shadow: 0 0 0 3px #0af, 0 1px 4px rgba(0,0,0,.4); }
+  .locate-btn {
+    background: var(--surface-elevated); color: var(--text-primary); border: none;
+    width: 30px; height: 30px; line-height: 30px; font-size: 15px; cursor: pointer;
+    display: block; padding: 0; text-align: center;
+  }
+  .locate-btn:hover { background: var(--surface-sunken); }
   .veh .d { font-weight: 400; opacity: .9; }
   .panel { position: absolute; z-index: 1000; background: var(--surface-elevated);
            color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -605,6 +611,57 @@ function initAlertCollapse() {
   });
 }
 
+let userMarker = null, userAccuracyCircle = null;
+
+function locateMe() {
+  if (!navigator.geolocation) {
+    status.textContent = 'Standortbestimmung wird von diesem Browser nicht unterstützt.';
+    status.classList.add('error');
+    return;
+  }
+  status.textContent = 'Standort wird ermittelt …';
+  status.classList.remove('error');
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      if (userMarker) map.removeLayer(userMarker);
+      if (userAccuracyCircle) map.removeLayer(userAccuracyCircle);
+      userMarker = L.circleMarker([latitude, longitude], {
+        radius: 7, weight: 2, color: '#fff', fillColor: '#06c', fillOpacity: 1,
+      }).addTo(map).bindPopup('Dein Standort').openPopup();
+      userAccuracyCircle = L.circle([latitude, longitude], {
+        radius: accuracy, color: '#06c', weight: 1, fillOpacity: 0.08,
+      }).addTo(map);
+      map.setView([latitude, longitude], Math.max(map.getZoom(), 16));
+      status.classList.remove('error');
+    },
+    (err) => {
+      const messages = {
+        1: 'Standortzugriff wurde verweigert.',
+        2: 'Standort konnte nicht ermittelt werden.',
+        3: 'Zeitüberschreitung bei der Standortbestimmung.',
+      };
+      status.textContent = messages[err.code] || 'Standort konnte nicht ermittelt werden.';
+      status.classList.add('error');
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
+}
+
+const LocateControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd: function () {
+    const btn = L.DomUtil.create('button', 'locate-btn leaflet-bar');
+    btn.type = 'button';
+    btn.title = 'Meinen Standort anzeigen';
+    btn.setAttribute('aria-label', 'Meinen Standort anzeigen');
+    btn.textContent = '📍';
+    L.DomEvent.disableClickPropagation(btn);
+    L.DomEvent.on(btn, 'click', locateMe);
+    return btn;
+  },
+});
+
 function warnOnTileErrors(tileLayer, hasCustomTileUrl) {
   let failed = 0;
   tileLayer.on('tileerror', () => {
@@ -636,6 +693,7 @@ async function init() {
     attribution: cfg.tile_attribution || 'Map <a href="https://wikimediafoundation.org/wiki/Maps_Terms_of_Use">Wikimedia</a> | &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   }).addTo(map);
   warnOnTileErrors(tileLayer, !!cfg.tile_url);
+  map.addControl(new LocateControl());
   networkLayer = L.layerGroup();
   stopLayer = L.layerGroup();
   vehicleLayer = L.layerGroup().addTo(map);
