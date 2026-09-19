@@ -49,7 +49,7 @@ jobs:
               docs:*|docs\(*\):*) docs+=("${subject#*: }") ;;
               *) other+=("${subject}") ;;
             esac
-          done < <(git log ${range} --no-merges --pretty=format:%s)
+          done < <(git log ${range} --no-merges --pretty=format:%s; echo)
 
           {
             echo "## [${{ steps.version.outputs.new_version }}] - $(date -u +%Y-%m-%d)"

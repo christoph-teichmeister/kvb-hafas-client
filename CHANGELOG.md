@@ -5,11 +5,21 @@ All notable changes to this project are documented in this file.
 
 ## [2026.9.3] - 2026-09-19
 
+### Features
+
+- redesign web UI and fix stale dashboard data (#9)
 
 ## [2026.9.2] - 2026-09-19
 
+### Features
+
+- bring the map/departures/dashboard HTTP server back into this repo (#8)
 
 ## [2026.9.1] - 2026-09-19
+
+### Features
+
+- automated CalVer release pipeline, changelog, and branch/commit conventions (#7)
 
 ## [2026.9.0] - 2026-09-18
 
