@@ -78,8 +78,11 @@ Geometrie-Prefetch und SQLite-Vehicle-History laufen komplett hier
 (`kvb_hafas/server/`), keine externen Dependencies über `requests` hinaus.
 Konfiguration über Env-Vars (`PORT`, `HISTORY_ENABLED`,
 `HISTORY_SAMPLE_INTERVAL_SECONDS`, `VEHICLE_POLL_CACHE_TTL_SECONDS`,
-`DEFAULT_MAP_CENTER_LAT`/`_LON`, `TILE_URL`/`TILE_ATTRIBUTION`, …) — Defaults
-siehe `kvb_hafas/server/http_server.py`.
+`DEFAULT_MAP_CENTER_LAT`/`_LON`, `TILE_URL`/`TILE_ATTRIBUTION`,
+`VEHICLE_SNAPSHOT_MIN_LAT`/`_LON`/`MAX_LAT`/`_LON` (stadtweite Bbox, die ein
+Hintergrund-Thread unabhängig von offenen Karten-Tabs pollt — versorgt
+Dashboard-Live-Stats und die Verlaufs-Erfassung), …) — Defaults siehe
+`kvb_hafas/server/http_server.py`.
 
 Das [kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map) Home
 Assistant Add-on ist nur noch eine dünne Docker/Ingress-Hülle darum: es zieht

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KVB Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="shared.css">
 </head>
 <body>
@@ -19,6 +20,7 @@
 <main>
   <h1>Dashboard</h1>
   <p class="subtitle"><span class="live-dot" id="liveDot" style="display:none"></span> <span id="liveLabel">Live</span></p>
+  <div class="refresh-bar"><div class="refresh-bar-fill" id="refreshBarFill"></div></div>
 
   <h2>Live</h2>
   <div class="stat-grid" id="liveTiles" role="region" aria-live="polite">
@@ -97,7 +99,7 @@ async function refreshLive() {
     const d = await res.json();
     if (!res.ok) throw new Error(d.error || res.statusText);
     dot.style.display = 'inline-block';
-    label.textContent = `Live — aktualisiert alle ${refreshSeconds}s`;
+    label.textContent = `Live - aktualisiert alle ${refreshSeconds}s`;
     const trend = prevDelayed === null ? null : d.delayed_vehicle_count - prevDelayed;
     prevDelayed = d.delayed_vehicle_count;
     box.innerHTML = [
@@ -219,10 +221,20 @@ async function refreshPunctuality() {
   }
 }
 
+function restartRefreshBar() {
+  const fill = document.getElementById('refreshBarFill');
+  fill.style.transition = 'none';
+  fill.style.width = '0%';
+  void fill.offsetWidth; // force reflow so the next transition starts from 0%
+  fill.style.transition = `width ${refreshSeconds}s linear`;
+  fill.style.width = '100%';
+}
+
 function refreshAll() {
   refreshLive();
   refreshDelays();
   refreshPunctuality();
+  restartRefreshBar();
 }
 
 async function init() {

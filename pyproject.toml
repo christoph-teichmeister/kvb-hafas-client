@@ -27,6 +27,7 @@ packages = ["kvb_hafas"]
 artifacts = [
     "kvb_hafas/webui/*.html",
     "kvb_hafas/webui/*.css",
+    "kvb_hafas/webui/*.svg",
     "kvb_hafas/webui/vendor/*.css",
     "kvb_hafas/webui/vendor/*.js",
     "kvb_hafas/webui/vendor/images/*.png",

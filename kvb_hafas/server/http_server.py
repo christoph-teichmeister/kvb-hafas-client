@@ -469,6 +469,8 @@ class Handler(BaseHTTPRequestHandler):
             self._vendor(path[len("/vendor/") :])
         elif path == "/shared.css":
             self._file("shared.css", "text/css; charset=utf-8")
+        elif path == "/favicon.svg":
+            self._file("favicon.svg", "image/svg+xml")
         elif path == "/api/config":
             self._json(200, self._config_payload())
         elif path == "/api/vehicles":

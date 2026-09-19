@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KVB Abfahrten</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="shared.css">
 </head>
 <body>
@@ -25,11 +26,13 @@
       <input type="text" id="query" placeholder="z.B. Neumarkt">
       <button id="searchBtn">Suchen</button>
     </div>
+    <button type="button" id="nearMeBtn" class="btn-outline btn-block">📍 Haltestellen in meiner Nähe</button>
     <ul class="stops" id="results" aria-live="polite"></ul>
   </details>
 
+  <div class="sr-only" id="boardsAnnouncer" aria-live="polite" aria-atomic="true"></div>
   <div class="led-strip" id="boardsDate"></div>
-  <div id="boards" class="stop-boards" role="region" aria-live="polite">
+  <div id="boards" class="stop-boards" role="region">
     <div class="stop-board-empty" id="boardsEmpty">Noch keine Haltestelle — oben suchen und favorisieren.</div>
   </div>
 </main>
@@ -167,6 +170,21 @@ function renderBoardRows(board) {
   }).join('');
 }
 
+function announceBoardUpdate(board) {
+  // Fires only on the 30s data refetch, not the 15s cosmetic countdown
+  // re-render — a live region on a ticking countdown would otherwise
+  // re-announce every tick.
+  const announcer = document.getElementById('boardsAnnouncer');
+  if (!board.departures.length) {
+    announcer.textContent = `${board.name}: keine Abfahrten`;
+    return;
+  }
+  const next = board.departures[0];
+  const eta = minutesUntil(next.realtime || next.planned);
+  const etaText = next.cancelled ? 'entfällt' : eta === null ? '' : eta <= 0 ? 'sofort' : `in ${eta} Minuten`;
+  announcer.textContent = `${board.name}: ${board.departures.length} Abfahrten, nächste Linie ${next.line} ${etaText}`;
+}
+
 async function refreshBoard(board) {
   try {
     const res = await fetch(`api/departures?stop_id=${encodeURIComponent(board.id)}&max=15`);
@@ -174,6 +192,7 @@ async function refreshBoard(board) {
     if (!res.ok) throw new Error(data.error || res.statusText);
     board.departures = data.departures || [];
     renderBoardRows(board);
+    announceBoardUpdate(board);
   } catch (err) {
     board.el.querySelector('.board-body').innerHTML =
       `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry-board="${board.id}">Erneut versuchen</button></div>`;
@@ -242,9 +261,19 @@ function renderStopList(container, stops) {
   for (const s of stops) {
     const li = document.createElement('li');
     li.addEventListener('click', () => addBoard(s.ext_id, s.name));
+    const group = document.createElement('span');
+    group.className = 'stop-label-group';
     const label = document.createElement('span');
     label.textContent = s.name;
     label.title = `ext_id: ${s.ext_id} (für die favorite_stop_ids-Option)`;
+    group.appendChild(label);
+    if (typeof s.distance === 'number') {
+      const dist = document.createElement('span');
+      dist.className = 'stop-distance';
+      dist.textContent = s.distance < 1000 ? `${Math.round(s.distance)} m` : `${(s.distance / 1000).toFixed(1)} km`;
+      group.appendChild(dist);
+    }
+    li.appendChild(group);
     const fav = favIcon(s.ext_id);
     const star = document.createElement('span');
     star.className = 'fav' + (fav.active ? ' active' : '');
@@ -257,10 +286,66 @@ function renderStopList(container, stops) {
         if (!boards.has(s.ext_id) && isLocalFav(s.ext_id)) addBoard(s.ext_id, s.name);
       });
     }
-    li.appendChild(label);
     li.appendChild(star);
     container.appendChild(li);
   }
+}
+
+// --- "In meiner Nähe" — reuses /api/stops (the same stop list map.html
+// draws markers from) plus browser geolocation, no new backend endpoint.
+
+let allStopsCache = null;
+
+async function loadAllStops() {
+  if (allStopsCache) return allStopsCache;
+  try {
+    const res = await fetch('api/stops');
+    allStopsCache = res.ok ? (await res.json()).stops || [] : [];
+  } catch (err) {
+    allStopsCache = [];
+  }
+  return allStopsCache;
+}
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function findNearbyStops() {
+  const results = document.getElementById('results');
+  if (!navigator.geolocation) {
+    results.innerHTML = '<li class="err">Standortbestimmung wird von diesem Browser nicht unterstützt.</li>';
+    return;
+  }
+  results.innerHTML = '<li class="empty">Standort wird ermittelt …</li>';
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const { latitude, longitude } = pos.coords;
+      const stops = await loadAllStops();
+      if (!stops.length) {
+        results.innerHTML = '<li class="empty">Keine Haltestellendaten verfügbar.</li>';
+        return;
+      }
+      lastResults = stops
+        .map((s) => ({ ...s, ext_id: s.id, distance: haversineMeters(latitude, longitude, s.lat, s.lon) }))
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, 8);
+      renderResultsCache();
+    },
+    (err) => {
+      const messages = {
+        1: 'Standortzugriff wurde verweigert.',
+        2: 'Standort konnte nicht ermittelt werden.',
+        3: 'Zeitüberschreitung bei der Standortbestimmung.',
+      };
+      results.innerHTML = `<li class="err">${messages[err.code] || 'Standort konnte nicht ermittelt werden.'}</li>`;
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
 }
 
 async function search() {
@@ -345,6 +430,7 @@ async function init() {
   alertsCacheTimer = setInterval(refreshAlertsCache, 300000);
 
   document.getElementById('searchBtn').addEventListener('click', search);
+  document.getElementById('nearMeBtn').addEventListener('click', findNearbyStops);
   document.getElementById('query').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
 
   document.getElementById('boards').addEventListener('click', (e) => {
