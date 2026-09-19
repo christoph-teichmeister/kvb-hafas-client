@@ -1,0 +1,35 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "kvb_hafas/webui/*.html"
+        ],
+        "createdAt": "2026-09-19T08:32:20.876Z",
+        "reason": "Design-Review (Assessment A): .live-dot pulses only while dashboard.html's live poll actually succeeds (JS toggles display on fetch success/failure), tied to genuinely live data per the rule's own carve-out, not decorative"
+      },
+      {
+        "rule": "marquee",
+        "value": "*",
+        "files": [
+          "kvb_hafas/webui/*.html"
+        ],
+        "createdAt": "2026-09-19T08:32:20.901Z",
+        "reason": "Design-Review (Assessment A): .led-ticker deliberately mimics a real KVB platform LED alert ticker per shared.css's own comment; domain-appropriate motion, not generic auto-scroll slop"
+      },
+      {
+        "rule": "repeating-stripes-gradient",
+        "value": "*",
+        "files": [
+          "kvb_hafas/webui/*.html"
+        ],
+        "createdAt": "2026-09-19T08:32:20.960Z",
+        "reason": "Design-Review (Assessment A): .led-board::before CRT-scanline overlay is intentional split-flap/LED-display texture, part of the authored hardware-mimicry direction, not decorative filler"
+      }
+    ]
+  }
+}

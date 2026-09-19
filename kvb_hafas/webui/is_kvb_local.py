@@ -26,3 +26,8 @@ def is_kvb_local(category: str | None) -> bool:
     """True for KVB's own modes (tram/Stadtbahn, bus), False for foreign rail
     (S-Bahn, RE, IC, ICE, ...) that merely passes through the bbox."""
     return css_class(category) in ("tram", "bus")
+
+
+def is_kvb_tram(category: str | None) -> bool:
+    """True only for KVB tram/Stadtbahn vehicles, excluding bus and rail."""
+    return css_class(category) == "tram"

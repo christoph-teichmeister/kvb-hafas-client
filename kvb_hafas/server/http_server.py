@@ -99,6 +99,13 @@ ALERT_CACHE_TTL_SECONDS = _env_float("ALERT_CACHE_TTL_SECONDS", 300.0)
 DEFAULT_MAP_CENTER_LAT = _env_float("DEFAULT_MAP_CENTER_LAT", 50.9375)
 DEFAULT_MAP_CENTER_LON = _env_float("DEFAULT_MAP_CENTER_LON", 6.9603)
 DEFAULT_ZOOM = _env_int("DEFAULT_ZOOM", 13)
+# City-wide box the background vehicle-snapshot poller fetches on its own
+# timer, so /api/stats/live and the history sampler have fresh data even
+# when no map.html tab is open polling its own (viewport-sized) bbox.
+VEHICLE_SNAPSHOT_MIN_LAT = _env_float("VEHICLE_SNAPSHOT_MIN_LAT", 50.80)
+VEHICLE_SNAPSHOT_MIN_LON = _env_float("VEHICLE_SNAPSHOT_MIN_LON", 6.75)
+VEHICLE_SNAPSHOT_MAX_LAT = _env_float("VEHICLE_SNAPSHOT_MAX_LAT", 51.05)
+VEHICLE_SNAPSHOT_MAX_LON = _env_float("VEHICLE_SNAPSHOT_MAX_LON", 7.15)
 FAVORITE_STOP_IDS = _env_list("FAVORITE_STOP_IDS", [])
 DASHBOARD_REFRESH_SECONDS = _env_int("DASHBOARD_REFRESH_SECONDS", 15)
 TILE_URL = os.environ.get("TILE_URL") or ""
@@ -119,6 +126,15 @@ MAX_VEHICLES = 600
 ALERT_AD_CATEGORY = 99
 LATE_FROM = 3
 PURGE_INTERVAL_SECONDS = 3600 * 6  # purge check four times a day is plenty for a daily-granularity retention
+
+# Dashboard punctuality-trend chart presets: window_seconds, bucket_seconds.
+# Server-picked (not client-supplied bucket sizes) to keep the query cheap
+# and bounded.
+PUNCTUALITY_WINDOWS = {
+    "7d": (7 * 86400, 86400),
+    "24h": (24 * 3600, 3600),
+    "1h": (3600, 300),
+}
 
 # --------------------------------------------------------------------------
 # Shared state — same ponytail as the source prototype: one lock, dict caches.
@@ -320,6 +336,20 @@ def _vehicles(bbox: tuple[float, float, float, float]) -> dict:
     return payload
 
 
+def _vehicle_snapshot_poller() -> None:
+    """Keeps _last_vehicle_snapshot fresh independent of whether a map.html
+    tab is open — /api/stats/live and the history sampler both only ever
+    read that global, which used to be written solely as a side effect of a
+    browser's own /api/vehicles viewport poll."""
+    bbox = (VEHICLE_SNAPSHOT_MIN_LAT, VEHICLE_SNAPSHOT_MIN_LON, VEHICLE_SNAPSHOT_MAX_LAT, VEHICLE_SNAPSHOT_MAX_LON)
+    while True:
+        try:
+            _vehicles(bbox)
+        except (KVBHafasError, OSError):
+            pass  # transient KVB hiccup; next tick tries again
+        time.sleep(VEHICLE_POLL_CACHE_TTL_SECONDS)
+
+
 def _service_alerts() -> dict:
     global _alerts
     with _lock:
@@ -439,6 +469,8 @@ class Handler(BaseHTTPRequestHandler):
             self._vendor(path[len("/vendor/") :])
         elif path == "/shared.css":
             self._file("shared.css", "text/css; charset=utf-8")
+        elif path == "/favicon.svg":
+            self._file("favicon.svg", "image/svg+xml")
         elif path == "/api/config":
             self._json(200, self._config_payload())
         elif path == "/api/vehicles":
@@ -456,9 +488,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/departures":
             self._departures_route(parse_qs(url.query))
         elif path == "/api/stats/live":
-            self._stats_live_route()
+            self._stats_live_route(parse_qs(url.query))
         elif path == "/api/stats/delays":
             self._stats_delays_route(parse_qs(url.query))
+        elif path == "/api/stats/punctuality-trend":
+            self._stats_punctuality_trend_route(parse_qs(url.query))
         elif path == "/api/history/trip":
             self._history_trip_route(parse_qs(url.query))
         elif path == "/api/history/vehicles":
@@ -542,18 +576,42 @@ class Handler(BaseHTTPRequestHandler):
             max_journeys = 10
         self._guarded(lambda: _departures(stop_id, max_journeys))
 
-    def _stats_live_route(self) -> None:
+    def _stats_live_route(self, query: dict) -> None:
+        mode = (query.get("mode", [None])[0]) or None
         with _lock:
             snapshot = list(_last_vehicle_snapshot)
-        self._json(200, live_stats(snapshot, late_from=LATE_FROM))
+        self._json(200, live_stats(snapshot, late_from=LATE_FROM, mode=mode))
 
     def _stats_delays_route(self, query: dict) -> None:
         if not _history:
-            self._json(200, {"error": "history disabled", "max_delay_minutes": None, "lines": [], "least_punctual_lines": []})
+            self._json(
+                200,
+                {
+                    "error": "history disabled",
+                    "max_delay_minutes": None,
+                    "max_delay_detail": None,
+                    "lines": [],
+                    "least_punctual_lines": [],
+                },
+            )
             return
         ts_from = self._int_or_none(query.get("from", [None])[0])
         ts_to = self._int_or_none(query.get("to", [None])[0])
-        self._guarded(lambda: _history.delay_stats(ts_from=ts_from, ts_to=ts_to))
+
+        def _combined() -> dict:
+            stats = _history.delay_stats(ts_from=ts_from, ts_to=ts_to)
+            stats["max_delay_detail"] = _history.max_delay_detail(ts_from=ts_from, ts_to=ts_to)
+            return stats
+
+        self._guarded(_combined)
+
+    def _stats_punctuality_trend_route(self, query: dict) -> None:
+        if not _history:
+            self._json(200, {"error": "history disabled", "buckets": [], "lines": {}})
+            return
+        window = (query.get("window", ["7d"])[0]) or "7d"
+        window_seconds, bucket_seconds = PUNCTUALITY_WINDOWS.get(window, PUNCTUALITY_WINDOWS["7d"])
+        self._guarded(lambda: _history.punctuality_trend(window_seconds, bucket_seconds))
 
     def _history_trip_route(self, query: dict) -> None:
         jid = (query.get("jid", [""])[0]).strip()
@@ -614,6 +672,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     _load_geometry()
     threading.Thread(target=_prefetch_geometry, daemon=True).start()
+    threading.Thread(target=_vehicle_snapshot_poller, daemon=True).start()
     if HISTORY_ENABLED:
         threading.Thread(target=_history_sampler, daemon=True).start()
         threading.Thread(target=_history_purger, daemon=True).start()

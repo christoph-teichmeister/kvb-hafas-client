@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KVB Live Map</title>
+<title>KVB Übersicht</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="shared.css">
 </head>
 <body>
@@ -14,7 +15,7 @@
   <h1>Übersicht</h1>
   <p class="subtitle">Live-Fahrzeuge, Abfahrten und Statistiken für den Kölner ÖPNV.</p>
 
-  <nav class="menu">
+  <nav class="menu" aria-label="Hauptmenü">
     <a class="menu-row featured" href="departures.html">
       <span class="menu-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -67,22 +68,44 @@ function minutesUntil(hafas) {
   return diff;
 }
 
+const FAV_KEY = 'kvb-departures-favorites';
+
+function loadLocalFavs() {
+  try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
+}
+
 async function loadFavPreview() {
+  // Shows the single soonest departure across ALL favorites (config + local),
+  // not just favorite_stop_ids[0] — departures.html shows every favorite as
+  // its own live board now, so previewing only the first one understates it.
   const el = document.getElementById('favPreview');
   try {
     const res = await fetch('api/config');
-    if (!res.ok) return;
-    const cfg = await res.json();
-    const id = (cfg.favorite_stop_ids || [])[0];
-    if (!id) return;
-    const dep = await fetch(`api/departures?stop_id=${encodeURIComponent(id)}&max=1`);
-    if (!dep.ok) return;
-    const data = await dep.json();
-    const next = (data.departures || [])[0];
-    if (!next) return;
-    const eta = minutesUntil(next.realtime || next.planned);
-    const etaText = next.cancelled ? 'entfällt' : eta === null ? '' : eta <= 0 ? 'sofort' : `${eta} min`;
-    el.textContent = `${next.line} → ${next.direction}${etaText ? ' · ' + etaText : ''}`;
+    const cfg = res.ok ? await res.json() : {};
+    const ids = [...new Set([...(cfg.favorite_stop_ids || []), ...loadLocalFavs()])];
+    if (!ids.length) {
+      el.textContent = 'Noch keine Haltestelle favorisiert';
+      return;
+    }
+    const results = await Promise.all(ids.map(async (id) => {
+      try {
+        const dep = await fetch(`api/departures?stop_id=${encodeURIComponent(id)}&max=1`);
+        if (!dep.ok) return null;
+        const data = await dep.json();
+        return (data.departures || [])[0] || null;
+      } catch { return null; }
+    }));
+    const candidates = results
+      .filter(d => d && !d.cancelled)
+      .map(d => ({ d, eta: minutesUntil(d.realtime || d.planned) }))
+      .filter(c => c.eta !== null);
+    if (!candidates.length) {
+      el.textContent = 'Aktuell keine Abfahrten an deinen Favoriten';
+      return;
+    }
+    candidates.sort((a, b) => a.eta - b.eta);
+    const { d: next, eta } = candidates[0];
+    el.textContent = `${next.line} → ${next.direction} · ${eta <= 0 ? 'sofort' : `${eta} min`}`;
   } catch (err) { /* ignore, purely optional */ }
 }
 loadFavPreview();

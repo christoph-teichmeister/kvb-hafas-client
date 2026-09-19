@@ -15,3 +15,7 @@ data/map_geometry.json.tmp
 
 # OSM-Rohdaten; die daraus gerouteten Gleisverläufe liegen getrackt in data/
 .cache/
+
+# Impeccable-Skill: lokaler Hook-Cache und Session-Critique-Snapshots
+.impeccable/hook.cache.json
+.impeccable/critique/

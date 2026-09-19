@@ -1,14 +1,19 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KVB live</title>
+<title>KVB Live-Karte</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="vendor/MarkerCluster.css">
+<link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
+<link rel="stylesheet" href="shared.css">
 <script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet.markercluster.js"></script>
 <style>
-  html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; }
-  #map { height: 100%; }
+  body { display: flex; flex-direction: column; }
+  #map { flex: 1; min-height: 0; }
   .veh { border-radius: 10px; color: #fff; font-weight: 700; font-size: 11px;
          text-align: center; line-height: 18px; height: 18px; min-width: 26px; padding: 0 3px;
          box-shadow: 0 1px 4px rgba(0,0,0,.4); border: 1px solid rgba(255,255,255,.8);
@@ -17,66 +22,157 @@
   .veh-bus  { background: #06c; }
   .veh-rail { background: #444; }
   .veh.late { border-color: #fc0; box-shadow: 0 0 0 2px #fc0, 0 1px 4px rgba(0,0,0,.4); }
+  .veh.highlight { border-color: #0af; box-shadow: 0 0 0 3px #0af, 0 1px 4px rgba(0,0,0,.4); }
+  .locate-btn {
+    background: var(--surface-elevated); color: var(--text-primary); border: none;
+    width: 30px; height: 30px; line-height: 30px; font-size: 15px; cursor: pointer;
+    display: block; padding: 0; text-align: center;
+  }
+  .locate-btn:hover { background: var(--surface-sunken); }
+  /* Neutral gray clusters instead of the library's default green/yellow/orange
+     — those would read as a 4th, unrelated mode color next to the existing
+     tram/bus/rail marker color-coding. */
+  .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background-color: rgba(68, 68, 68, .45); }
+  .marker-cluster-small div, .marker-cluster-medium div, .marker-cluster-large div {
+    background-color: rgba(68, 68, 68, .85); color: #fff; font-weight: 700;
+  }
   .veh .d { font-weight: 400; opacity: .9; }
-  .panel { position: absolute; z-index: 1000; background: #fff; border-radius: 6px;
-           box-shadow: 0 1px 6px rgba(0,0,0,.3); padding: 8px 10px; }
-  #nav { top: 10px; left: 10px; font-size: 12px; }
-  #nav a { color: #06c; text-decoration: none; margin-right: 10px; }
-  #controls { top: 10px; right: 10px; width: 210px; }
-  #controls label { display: block; margin: 3px 0; }
-  #controls input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
-  #controls .sub { margin-left: 16px; color: #555; font-size: 12px; }
-  #status { left: 10px; bottom: 10px; max-width: 60vw; }
-  #status.error { background: #fee; color: #900; }
-  #tilewarn { top: 10px; left: 50%; translate: -50% 0; max-width: min(90vw, 480px);
-              background: #fee; color: #900; }
+  .panel { position: absolute; z-index: 1000; background: var(--surface-elevated);
+           color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius-sm);
+           padding: 10px 12px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                font-size: 12px; font-weight: 600; cursor: pointer; }
+  .panel-head .chev { color: var(--text-secondary); transition: transform .15s; flex: none; }
+  #controls-head[aria-expanded="false"] .chev,
+  #alert-head[aria-expanded="false"] .chev { transform: rotate(-90deg); }
+  .info-btn { border: none; background: transparent; color: var(--text-secondary); cursor: pointer;
+              font-size: 13px; padding: 0 0 0 8px; flex: none; }
+  #controls { top: 62px; right: 10px; width: 230px; max-height: calc(100vh - 82px); overflow: auto; }
+  #controls-body { margin-top: 8px; }
+  #controls.collapsed #controls-body { display: none; }
+  #controls .search input {
+    width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 13px;
+    background: var(--surface); color: var(--text-primary);
+  }
+  #controls .search input:focus { outline: none; box-shadow: var(--focus-ring); }
+  #controls fieldset.cat-group { border: none; border-top: 1px solid var(--border); margin: 0 0 8px; padding: 8px 0 0; }
+  #controls fieldset.cat-group:first-of-type { border-top: none; }
+  #controls legend { font-size: 12px; font-weight: 600; padding: 0; }
+  #controls label { display: block; margin: 4px 0; font-size: 13px; }
+  #controls details { margin: 2px 0 0 20px; }
+  #controls details summary { cursor: pointer; font-size: 11.5px; color: var(--text-secondary); }
+  #controls .sub { margin-left: 20px; color: var(--text-secondary); font-size: 12px; }
+  #controls .toggle-row { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
+  #reset-filters {
+    width: 100%; margin-top: 8px; padding: 7px 10px; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); background: var(--surface); color: var(--text-secondary);
+    font-size: 12px; cursor: pointer;
+  }
+  #reset-filters:hover { background: var(--surface-sunken); color: var(--text-primary); }
+  #status { left: 10px; bottom: 10px; max-width: 60vw; font-size: 12px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+  #status.error { background: var(--negative-tint); color: var(--negative); }
+  #tilewarn { top: 62px; left: 50%; translate: -50% 0; max-width: min(90vw, 480px);
+              background: var(--negative-tint); color: var(--negative); }
   #bottomright { position: absolute; right: 10px; bottom: 10px; z-index: 1000;
                  display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   #alertlist { position: static; width: 300px; max-height: 40vh; overflow: auto; display: none; }
+  #alert-body.collapsed { display: none; }
   #prefetch { position: static; width: 360px; max-width: calc(100vw - 40px); font-size: 12px;
               display: none; opacity: 0; translate: 0 6px;
               transition: opacity .25s ease, translate .25s ease, display .25s allow-discrete; }
   #prefetch.show { display: block; opacity: 1; translate: 0 0; }
   @starting-style { #prefetch.show { opacity: 0; translate: 0 6px; } }
   @media (prefers-reduced-motion: reduce) { #prefetch { transition: none; } }
-  #prefetch b { display: block; font-size: 13px; }
-  #prefetch .sub { color: #555; margin-top: 3px; }
-  #prefetch .now { color: #06c; margin-top: 3px; word-break: break-word; }
-  #prefetch .bar { height: 6px; margin-top: 5px; border-radius: 3px; background: #e5e5e5; overflow: hidden; }
-  #prefetch .bar i { display: block; height: 100%; background: #06c; }
+  #prefetch b { font-size: 13px; }
+  #prefetch .sub { color: var(--text-secondary); margin-top: 3px; }
+  #prefetch .now { color: var(--text-primary); margin-top: 3px; word-break: break-word; }
+  #prefetch .bar { height: 6px; margin-top: 5px; border-radius: 3px; background: var(--surface-sunken); overflow: hidden; }
+  #prefetch .bar i { display: block; height: 100%; background: var(--accent); }
+  #prefetch .explain { display: none; }
+  #prefetch .explain.show { display: block; }
   #alertlist li { margin-bottom: 8px; font-size: 12px; }
   #alertlist ul { margin: 4px 0 0; padding-left: 16px; }
   .alert-pin { background: #e67e00; border: 2px solid #fff; border-radius: 50%;
                width: 14px; height: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+  @media (max-width: 640px) {
+    #controls { top: auto; bottom: 10px; left: 10px; right: 10px; width: auto; max-height: 45vh; }
+    #bottomright { right: 10px; bottom: auto; top: 62px; }
+    .panel { padding: 8px 10px; }
+    #prefetch, #alertlist { width: min(280px, calc(100vw - 40px)); }
+    #status { max-width: calc(100vw - 20px); }
+  }
 </style>
 </head>
 <body>
+<header class="app-header">
+  <a class="brand" href="index.html"><span class="dot"></span>KVB Live</a>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="map.html" class="active">Karte</a>
+    <a href="departures.html">Abfahrten</a>
+    <a href="dashboard.html">Dashboard</a>
+  </nav>
+</header>
 <div id="map"></div>
-<div class="panel" id="nav"><a href="index.html">Home</a><a href="departures.html">Departures</a><a href="dashboard.html">Dashboard</a></div>
 <div class="panel" id="controls">
-  <input type="text" id="lines" placeholder="Lines, e.g. 1,9,18">
-  <label><input type="checkbox" class="cat" value="tram" checked> Tram/Stadtbahn</label>
-  <label class="sub"><input type="checkbox" class="stopcat" value="tram"> Stops</label>
-  <label class="sub"><input type="checkbox" class="netcat" value="tram"> Routes</label>
-  <label><input type="checkbox" class="cat" value="bus" checked> Bus</label>
-  <label class="sub"><input type="checkbox" class="stopcat" value="bus"> Stops</label>
-  <label class="sub"><input type="checkbox" class="netcat" value="bus"> Routes</label>
-  <label><input type="checkbox" class="cat" value="rail" checked> Train/S-Bahn</label>
-  <label class="sub"><input type="checkbox" class="stopcat" value="rail"> Stations</label>
-  <label class="sub"><input type="checkbox" class="netcat" value="rail"> Routes</label>
-  <label><input type="checkbox" id="onlyLate"> only delayed 3+ min</label>
-  <label><input type="checkbox" id="showAlerts"> Service alerts</label>
+  <div class="panel-head" id="controls-head" role="button" tabindex="0" aria-expanded="true" aria-controls="controls-body">
+    <span>Filter</span><span class="chev" aria-hidden="true">▾</span>
+  </div>
+  <div id="controls-body">
+  <div class="search"><input type="text" id="lines" placeholder="Linien, z.B. 1,9,18"></div>
+
+  <fieldset class="cat-group">
+    <legend>Tram/Stadtbahn</legend>
+    <label><input type="checkbox" class="cat" value="tram" checked> anzeigen</label>
+    <details>
+      <summary>mehr</summary>
+      <label class="sub"><input type="checkbox" class="stopcat" value="tram"> Haltestellen</label>
+      <label class="sub"><input type="checkbox" class="netcat" value="tram"> Linienverläufe</label>
+    </details>
+  </fieldset>
+
+  <fieldset class="cat-group">
+    <legend>Bus</legend>
+    <label><input type="checkbox" class="cat" value="bus" checked> anzeigen</label>
+    <details>
+      <summary>mehr</summary>
+      <label class="sub"><input type="checkbox" class="stopcat" value="bus"> Haltestellen</label>
+      <label class="sub"><input type="checkbox" class="netcat" value="bus"> Linienverläufe</label>
+    </details>
+  </fieldset>
+
+  <fieldset class="cat-group">
+    <legend>Bahn/S-Bahn</legend>
+    <label><input type="checkbox" class="cat" value="rail" checked> anzeigen</label>
+    <details>
+      <summary>mehr</summary>
+      <label class="sub"><input type="checkbox" class="stopcat" value="rail"> Stationen</label>
+      <label class="sub"><input type="checkbox" class="netcat" value="rail"> Linienverläufe</label>
+    </details>
+  </fieldset>
+
+  <div class="toggle-row">
+    <label><input type="checkbox" id="onlyLate"> nur ≥3 Min. verspätet</label>
+    <label><input type="checkbox" id="showAlerts"> Störungsmeldungen</label>
+  </div>
+  <button type="button" id="reset-filters">Filter zurücksetzen</button>
+  </div>
 </div>
-<div class="panel" id="status">loading …</div>
+<div class="panel" id="status" role="status" aria-live="polite" aria-atomic="true">lädt …</div>
 <div id="bottomright">
   <div class="panel" id="alertlist"></div>
   <div class="panel" id="prefetch">
-    <b>Loading route geometry</b>
+    <div class="panel-head">
+      <b>Lade Linienverläufe</b>
+      <button type="button" id="prefetch-info-btn" class="info-btn" aria-expanded="false" aria-controls="prefetch-explain" title="Was bedeutet das?">ⓘ</button>
+    </div>
     <div class="sub" id="prefetchWhat"></div>
     <div class="bar"><i id="prefetchBar" style="width:0"></i></div>
     <div class="now" id="prefetchNow"></div>
-    <div class="sub">While a line is missing it's drawn as a straight line —
-      its geometry is fetched once per line/direction and then cached.</div>
+    <div class="sub explain" id="prefetch-explain">Solange eine Linie fehlt, wird sie als gerade Verbindung gezeichnet —
+      ihr Streckenverlauf wird einmal je Linie/Richtung geladen und dann zwischengespeichert.</div>
   </div>
 </div>
 <script>
@@ -100,6 +196,13 @@ let status, alertList;
 const fleet = new Map();
 let pollTimer = null, moveTimer = null, lastPayload = null;
 
+// Deep-link support: dashboard.html's max-delay tile links here with
+// ?line=<line>&jid=<jid> to pre-filter and pan/highlight one vehicle.
+const deepLinkParams = new URLSearchParams(location.search);
+const deepLinkLine = deepLinkParams.get('line');
+const deepLinkJid = deepLinkParams.get('jid');
+let deepLinkHandled = !(deepLinkLine || deepLinkJid);
+
 const CAT_COLOURS = [[/s-?bahn/, '#008d4f'], [/ice|^ic$|fern|tha|flx/, '#ec0016'], [/re|rb|regio|sev/, '#646973']];
 
 function lineColour(colour, category) {
@@ -113,6 +216,11 @@ function cssClass(category) {
   if (c.includes('str') || c.includes('tram') || c.includes('stadtbahn')) return 'tram';
   if (c.includes('bus')) return 'bus';
   return 'rail';
+}
+
+function friendlyError(err) {
+  if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
+  return err.message || 'Unbekannter Fehler';
 }
 
 function filters() {
@@ -136,14 +244,16 @@ function icon(v) {
   const suffix = late ? ` <span class="d">+${v.delay}</span>` : '';
   const colour = lineColour(v.colour, v.category);
   const style = colour ? ` style="background:${colour};color:${v.colour === colour ? (v.text_colour || '#fff') : '#fff'}"` : '';
+  const highlighted = deepLinkJid && v.jid === deepLinkJid;
+  const cls = `veh veh-${cssClass(v.category)}${late ? ' late' : ''}${highlighted ? ' highlight' : ''}`;
   return L.divIcon({ className: '', iconSize: null,
-    html: `<div class="veh veh-${cssClass(v.category)}${late ? ' late' : ''}"${style}>${v.line}${suffix}</div>` });
+    html: `<div class="${cls}"${style}>${v.line}${suffix}</div>` });
 }
 
 function popup(v) {
-  const delay = v.delay === null ? 'no realtime data'
-    : v.delay > 0 ? `${v.delay} min late` : v.delay < 0 ? `${-v.delay} min early` : 'on time';
-  return `<b>${v.line}</b> → ${v.direction}<br>next stop: ${v.next_stop || '—'}<br>${delay}`;
+  const delay = v.delay === null ? 'keine Echtzeitdaten'
+    : v.delay > 0 ? `${v.delay} Min. verspätet` : v.delay < 0 ? `${-v.delay} Min. zu früh` : 'pünktlich';
+  return `<b>${v.line}</b> → ${v.direction}<br>nächster Halt: ${v.next_stop || '—'}<br>${delay}`;
 }
 
 function positionAt(track, elapsed) {
@@ -182,7 +292,7 @@ async function refresh() {
     lastPayload = data;
     apply(data);
   } catch (err) {
-    status.textContent = `Error: ${err.message}`;
+    status.textContent = `Fehler: ${friendlyError(err)}`;
     status.classList.add('error');
   }
 }
@@ -209,6 +319,30 @@ function apply(data) {
     if (!seen.has(jid)) { vehicleLayer.removeLayer(entry.marker); fleet.delete(jid); }
   }
   render(data);
+  tryDeepLinkFocus();
+}
+
+function tryDeepLinkFocus() {
+  if (deepLinkHandled) return;
+  deepLinkHandled = true; // attempt exactly once, even if the jid never shows up
+  if (!deepLinkJid) return; // line-only deep link: the #lines filter already applied
+  const entry = fleet.get(deepLinkJid);
+  if (!entry) {
+    status.textContent = `Fahrzeug ist derzeit nicht aktiv — Filter auf Linie ${deepLinkLine || ''} angewendet.`;
+    return;
+  }
+  show(entry, true);
+  const focus = () => {
+    map.setView(entry.marker.getLatLng(), Math.max(map.getZoom(), 16));
+    entry.marker.openPopup();
+  };
+  // The marker may currently be clustered — zoomToShowLayer un-clusters/
+  // spiderfies it first, then calls back once it's safe to open the popup.
+  if (typeof vehicleLayer.zoomToShowLayer === 'function') {
+    vehicleLayer.zoomToShowLayer(entry.marker, focus);
+  } else {
+    focus();
+  }
 }
 
 function show(entry, visible) {
@@ -233,9 +367,9 @@ function renderPrefetch(p) {
               shown: prefetch ? prefetch.shown : done, pct: prefetch ? prefetch.pct : 0 };
   box.classList.add('show');
   document.getElementById('prefetchWhat').textContent =
-    `${done} of ${p.queued} lines/directions fetched${eta(rate, p.pending)}`;
+    `${done} von ${p.queued} Linien/Richtungen geladen${eta(rate, p.pending)}`;
   document.getElementById('prefetchNow').textContent =
-    p.current && p.current.length ? `now: ${p.current.join(', ')}` : '';
+    p.current && p.current.length ? `gerade: ${p.current.join(', ')}` : '';
 }
 
 function animatePrefetch(now) {
@@ -252,7 +386,7 @@ function eta(rate, pending) {
   if (!rate) return '';
   const left = Math.round(pending / rate / 1000);
   if (!isFinite(left) || left <= 0) return '';
-  return left < 60 ? ` · ~${left}s left` : ` · ~${Math.round(left / 60)}min left`;
+  return left < 60 ? ` · noch ~${left}s` : ` · noch ~${Math.round(left / 60)}min`;
 }
 
 function render(data) {
@@ -262,9 +396,9 @@ function render(data) {
   const geo = data.known_segments || 0;
   status.classList.remove('error');
   const drawn = networkLayer.getLayers().length;
-  status.textContent = `${shown.length}/${data.vehicles.length} vehicles · ${late} delayed · `
-    + `${drawn} of ${geo} route segments drawn (filtered) · `
-    + `as of ${new Date(data.served_at).toLocaleTimeString()}`;
+  const time = new Date(data.served_at).toLocaleTimeString();
+  status.textContent = `${shown.length}/${data.vehicles.length} Fahrzeuge · ${late} verspätet · ${time}`;
+  status.title = `${drawn} von ${geo} Streckensegmenten gezeichnet (gefiltert) · Stand ${time}`;
 }
 
 function refilter() {
@@ -285,15 +419,19 @@ async function refreshAlerts() {
     for (const a of data.alerts) {
       for (const [lat, lon] of a.points) {
         L.marker([lat, lon], { icon: L.divIcon({ className: '', html: '<div class="alert-pin"></div>' }) })
-          .bindPopup(`<b>${a.stops.join(', ') || 'Alert'}</b><br>${a.text}`)
+          .bindPopup(`<b>${a.stops.join(', ') || 'Störung'}</b><br>${a.text}`)
           .addTo(alertLayer);
       }
     }
     const textOnly = data.alerts.filter(a => !a.points.length);
-    alertList.innerHTML = `<b>${data.alerts.length} alerts</b>`
-      + (textOnly.length ? `<ul>${textOnly.map(a => `<li>${a.text}</li>`).join('')}</ul>` : '');
+    alertList.innerHTML = `<div class="panel-head" id="alert-head" role="button" tabindex="0" aria-expanded="false" aria-controls="alert-body">
+        <b>${data.alerts.length} Störungsmeldungen</b><span class="chev" aria-hidden="true">▾</span>
+      </div>
+      <div id="alert-body" class="collapsed">${textOnly.length
+        ? `<ul>${textOnly.map(a => `<li>${a.text}</li>`).join('')}</ul>`
+        : '<div class="sub">Details auf der Karte antippen.</div>'}</div>`;
   } catch (err) {
-    alertList.innerHTML = `Alerts: ${err.message}`;
+    alertList.innerHTML = `Störungsmeldungen: ${friendlyError(err)}`;
   }
 }
 
@@ -307,7 +445,7 @@ async function loadNetwork() {
     const polylines = line.paths.map(path => {
       const schematic = path.length < 3;
       return L.polyline(path, { color: colour, weight: schematic ? 2 : 4, opacity: 0.75,
-        dashArray: schematic ? '6 6' : null }).bindPopup(`Line ${line.line}`);
+        dashArray: schematic ? '6 6' : null }).bindPopup(`Linie ${line.line}`);
     });
     networkLines.set(line.line, { polylines, category: line.category });
   }
@@ -366,11 +504,11 @@ function drawStops() {
 async function toggleStops() {
   if (!stopCats().size) { map.removeLayer(stopLayer); stopLayer.clearLayers(); return; }
   if (!stopMarkers.length) {
-    status.textContent = 'loading stops …';
+    status.textContent = 'lädt Haltestellen …';
     try {
       await loadStops();
     } catch (err) {
-      status.textContent = `Stops: ${err.message}`;
+      status.textContent = `Haltestellen: ${friendlyError(err)}`;
       status.classList.add('error');
       return;
     }
@@ -391,14 +529,14 @@ async function refreshNetwork() {
 
 async function toggleNetwork() {
   if (!netCats().size) { map.removeLayer(networkLayer); networkLayer.clearLayers(); return; }
-  status.textContent = 'loading route geometry …';
+  status.textContent = 'lädt Linienverläufe …';
   try {
     if (!networkLines.size) await loadNetwork();
     map.addLayer(networkLayer);
     drawNetwork();
     if (lastPayload) render(lastPayload);
   } catch (err) {
-    status.textContent = `Routes: ${err.message}`;
+    status.textContent = `Linienverläufe: ${friendlyError(err)}`;
     status.classList.add('error');
   }
 }
@@ -435,6 +573,115 @@ function loadPrefs() {
   }
 }
 
+function resetFilters() {
+  document.getElementById('lines').value = '';
+  document.querySelectorAll('.cat').forEach(c => { c.checked = true; });
+  document.querySelectorAll('.stopcat, .netcat').forEach(c => { c.checked = false; });
+  document.getElementById('onlyLate').checked = false;
+  document.getElementById('showAlerts').checked = false;
+  document.querySelectorAll('#controls details').forEach(d => { d.open = false; });
+  try { localStorage.removeItem(PREFS_KEY); } catch (err) { /* private mode */ }
+  refilter();
+  toggleStops();
+  toggleNetwork();
+  toggleAlerts();
+}
+
+const CONTROLS_COLLAPSED_KEY = 'kvb-map-controls-collapsed';
+
+function setControlsCollapsed(collapsed) {
+  const panel = document.getElementById('controls');
+  panel.classList.toggle('collapsed', collapsed);
+  document.getElementById('controls-head').setAttribute('aria-expanded', String(!collapsed));
+  try { localStorage.setItem(CONTROLS_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch (err) { /* private mode */ }
+}
+
+function initControlsCollapse() {
+  let stored = null;
+  try { stored = localStorage.getItem(CONTROLS_COLLAPSED_KEY); } catch (err) { /* private mode */ }
+  const collapsed = stored !== null ? stored === '1' : window.matchMedia('(max-width: 768px)').matches;
+  setControlsCollapsed(collapsed);
+  const head = document.getElementById('controls-head');
+  head.addEventListener('click', () => setControlsCollapsed(!document.getElementById('controls').classList.contains('collapsed')));
+  head.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    setControlsCollapsed(!document.getElementById('controls').classList.contains('collapsed'));
+  });
+}
+
+function initPrefetchInfoToggle() {
+  document.getElementById('prefetch-info-btn').addEventListener('click', () => {
+    const btn = document.getElementById('prefetch-info-btn');
+    const explain = document.getElementById('prefetch-explain');
+    const show = !explain.classList.contains('show');
+    explain.classList.toggle('show', show);
+    btn.setAttribute('aria-expanded', String(show));
+  });
+}
+
+function initAlertCollapse() {
+  alertList.addEventListener('click', (e) => {
+    const head = e.target.closest('#alert-head');
+    if (!head) return;
+    const body = document.getElementById('alert-body');
+    const show = body.classList.contains('collapsed');
+    body.classList.toggle('collapsed', !show);
+    head.setAttribute('aria-expanded', String(show));
+  });
+}
+
+let userMarker = null, userAccuracyCircle = null;
+
+function locateMe() {
+  if (!navigator.geolocation) {
+    status.textContent = 'Standortbestimmung wird von diesem Browser nicht unterstützt.';
+    status.classList.add('error');
+    return;
+  }
+  status.textContent = 'Standort wird ermittelt …';
+  status.classList.remove('error');
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      if (userMarker) map.removeLayer(userMarker);
+      if (userAccuracyCircle) map.removeLayer(userAccuracyCircle);
+      userMarker = L.circleMarker([latitude, longitude], {
+        radius: 7, weight: 2, color: '#fff', fillColor: '#06c', fillOpacity: 1,
+      }).addTo(map).bindPopup('Dein Standort').openPopup();
+      userAccuracyCircle = L.circle([latitude, longitude], {
+        radius: accuracy, color: '#06c', weight: 1, fillOpacity: 0.08,
+      }).addTo(map);
+      map.setView([latitude, longitude], Math.max(map.getZoom(), 16));
+      status.classList.remove('error');
+    },
+    (err) => {
+      const messages = {
+        1: 'Standortzugriff wurde verweigert.',
+        2: 'Standort konnte nicht ermittelt werden.',
+        3: 'Zeitüberschreitung bei der Standortbestimmung.',
+      };
+      status.textContent = messages[err.code] || 'Standort konnte nicht ermittelt werden.';
+      status.classList.add('error');
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
+}
+
+const LocateControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd: function () {
+    const btn = L.DomUtil.create('button', 'locate-btn leaflet-bar');
+    btn.type = 'button';
+    btn.title = 'Meinen Standort anzeigen';
+    btn.setAttribute('aria-label', 'Meinen Standort anzeigen');
+    btn.textContent = '📍';
+    L.DomEvent.disableClickPropagation(btn);
+    L.DomEvent.on(btn, 'click', locateMe);
+    return btn;
+  },
+});
+
 function warnOnTileErrors(tileLayer, hasCustomTileUrl) {
   let failed = 0;
   tileLayer.on('tileerror', () => {
@@ -444,8 +691,8 @@ function warnOnTileErrors(tileLayer, hasCustomTileUrl) {
     div.id = 'tilewarn';
     div.className = 'panel';
     div.innerHTML = hasCustomTileUrl
-      ? 'Map tiles failed to load. Check the <code>tile_url</code>/<code>tile_attribution</code> app options (wrong URL template, missing/invalid API key, or domain not allowlisted with your tile provider).'
-      : 'Map tiles failed to load — the default free tile source is blocking this request. Set a <code>tile_url</code> (e.g. from <a href="https://stadiamaps.com/" target="_blank" rel="noopener">Stadia Maps</a>\' free tier) in the app options. See the README’s "Map tiles" section.';
+      ? 'Kartenkacheln konnten nicht geladen werden. Prüfe die Optionen <code>tile_url</code>/<code>tile_attribution</code> (falsche URL-Vorlage, fehlender/ungültiger API-Key, oder Domain nicht beim Anbieter freigegeben).'
+      : 'Kartenkacheln konnten nicht geladen werden — die kostenlose Standardquelle blockiert diese Anfrage. Setze eine <code>tile_url</code> (z.B. aus dem kostenlosen Tarif von <a href="https://stadiamaps.com/" target="_blank" rel="noopener">Stadia Maps</a>) in den App-Optionen. Siehe den Abschnitt „Map tiles“ in der README.';
     document.body.appendChild(div);
   });
 }
@@ -466,9 +713,15 @@ async function init() {
     attribution: cfg.tile_attribution || 'Map <a href="https://wikimediafoundation.org/wiki/Maps_Terms_of_Use">Wikimedia</a> | &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   }).addTo(map);
   warnOnTileErrors(tileLayer, !!cfg.tile_url);
+  map.addControl(new LocateControl());
   networkLayer = L.layerGroup();
   stopLayer = L.layerGroup();
-  vehicleLayer = L.layerGroup().addTo(map);
+  vehicleLayer = L.markerClusterGroup({
+    maxClusterRadius: 50,
+    disableClusteringAtZoom: 15,
+    showCoverageOnHover: false,
+    spiderfyOnMaxZoom: false,
+  }).addTo(map);
   alertLayer = L.layerGroup();
 
   status = document.getElementById('status');
@@ -487,12 +740,22 @@ async function init() {
   document.getElementById('showAlerts').addEventListener('change', toggleAlerts);
   document.querySelectorAll('.stopcat').forEach(c => c.addEventListener('change', toggleStops));
   document.querySelectorAll('.netcat').forEach(c => c.addEventListener('change', toggleNetwork));
+  document.getElementById('reset-filters').addEventListener('click', resetFilters);
   prefControls.forEach(el => el.addEventListener('change', savePrefs));
   document.getElementById('lines').addEventListener('input', savePrefs);
   map.on('moveend', () => { clearTimeout(moveTimer); moveTimer = setTimeout(schedule, 400); });
   map.on('zoomend', drawStops);
+  initControlsCollapse();
+  initPrefetchInfoToggle();
+  initAlertCollapse();
 
   loadPrefs();
+  if (deepLinkLine) {
+    // Overrides whatever loadPrefs() just restored, for this load only —
+    // deliberately not saved via savePrefs(), so a dashboard click-through
+    // never becomes the new persisted filter default.
+    document.getElementById('lines').value = deepLinkLine;
+  }
   schedule();
   toggleAlerts();
   toggleNetwork();
