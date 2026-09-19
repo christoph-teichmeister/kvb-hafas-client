@@ -19,27 +19,26 @@
 <main>
   <h1>Abfahrten</h1>
 
-  <h2>Haltestelle suchen</h2>
-  <div class="search">
-    <input type="text" id="query" placeholder="z.B. Neumarkt">
-    <button id="searchBtn">Suchen</button>
+  <details id="stopSearch">
+    <summary>Haltestelle suchen</summary>
+    <div class="search">
+      <input type="text" id="query" placeholder="z.B. Neumarkt">
+      <button id="searchBtn">Suchen</button>
+    </div>
+    <ul class="stops" id="results" aria-live="polite"></ul>
+  </details>
+
+  <div class="led-strip" id="boardsDate"></div>
+  <div id="boards" class="stop-boards" role="region" aria-live="polite">
+    <div class="stop-board-empty" id="boardsEmpty">Noch keine Haltestelle — oben suchen und favorisieren.</div>
   </div>
-  <ul class="stops" id="results" aria-live="polite"></ul>
-
-  <h2>Favoriten</h2>
-  <ul class="stops" id="favorites"></ul>
-
-  <h2>Abfahrtstafel</h2>
-  <div id="board" class="board-group" role="region" aria-live="polite"><div class="led-board"><div class="led-empty">Haltestelle suchen oder Favorit oben auswählen.</div></div></div>
 </main>
 <script>
 const FAV_KEY = 'kvb-departures-favorites';
 const FAV_NAMES_KEY = 'kvb-departures-favorite-names';
 const WEEKDAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
 let cfg = { favorite_stop_ids: [] };
-let currentStopId = null, currentStopName = null;
-let boardTimer = null, countdownTimer = null, clockTimer = null;
-let boardDepartures = [];
+let alertsCacheTimer = null;
 
 function friendlyError(err) {
   if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
@@ -61,23 +60,176 @@ function saveFavName(id, name) {
   try { localStorage.setItem(FAV_NAMES_KEY, JSON.stringify(names)); } catch { /* private mode */ }
 }
 
-function favIds() {
-  // Union of add-on-configured favorites and ones the browser has starred locally.
-  return new Set([...(cfg.favorite_stop_ids || []), ...loadLocalFavs()]);
-}
-
 function isConfigFav(id) {
   return (cfg.favorite_stop_ids || []).includes(id);
 }
+function isLocalFav(id) {
+  return loadLocalFavs().includes(id);
+}
 
-function toggleFav(id, name) {
-  if (isConfigFav(id)) return; // fest über App-Konfiguration, nicht per Klick entfernbar
+// --- Multi-stop board grid --------------------------------------------
+// Each favorite (and each stop a user is previewing from search) is its
+// own live card. No click-to-select step: favorites simply appear.
+
+const boards = new Map(); // stopId -> { name, departures, refreshTimer, countdownTimer, el }
+
+function fmtTime(hafas) {
+  if (!hafas) return '—';
+  const t = hafas.slice(-6);
+  return `${t.slice(0, 2)}:${t.slice(2, 4)}`;
+}
+
+function minutesUntil(hafas) {
+  if (!hafas || hafas.length < 4) return null;
+  const now = new Date();
+  const h = parseInt(hafas.slice(-6, -4), 10), m = parseInt(hafas.slice(-4, -2), 10);
+  const target = new Date(now);
+  target.setHours(h, m, 0, 0);
+  let diff = Math.round((target - now) / 60000);
+  if (diff < -60) diff += 1440;
+  return diff;
+}
+
+function headClock() {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+}
+
+function headDate() {
+  const now = new Date();
+  const dd = String(now.getDate()).padStart(2, '0');
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  return `${WEEKDAYS[now.getDay()]} ${dd}.${mm}.${now.getFullYear()}`;
+}
+
+function groupByPlatform(deps) {
+  const groups = new Map();
+  for (const d of deps) {
+    const key = d.platform ? String(d.platform) : '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d);
+  }
+  return [...groups.entries()].sort(([a], [b]) => {
+    if (a === '') return 1;
+    if (b === '') return -1;
+    const na = parseInt(a, 10), nb = parseInt(b, 10);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+}
+
+function updateEmptyState() {
+  document.getElementById('boardsEmpty').style.display = boards.size ? 'none' : '';
+}
+
+function favIcon(id) {
+  if (isConfigFav(id)) return { icon: '🔒', active: true, title: 'Fest über App-Konfiguration favorisiert (favorite_stop_ids)' };
+  if (isLocalFav(id)) return { icon: '★', active: true, title: 'Favorit entfernen (nur in diesem Browser gespeichert)' };
+  return { icon: '☆', active: false, title: 'Als Favorit merken' };
+}
+
+function renderBoardHead(board) {
+  const fav = favIcon(board.id);
+  const locked = isConfigFav(board.id);
+  const closeBtn = fav.active ? '' : `<button type="button" class="board-close" title="Entfernen" aria-label="Board entfernen">✕</button>`;
+  board.el.querySelector('.stop-board-head').innerHTML = `
+    <span class="stop-board-name">${board.name}</span>
+    <div class="stop-board-actions">
+      <button type="button" class="fav-toggle${fav.active ? ' active' : ''}" ${locked ? 'disabled' : ''} title="${fav.title}" aria-label="${fav.title}">${fav.icon}</button>
+      ${closeBtn}
+    </div>`;
+}
+
+function renderBoardRows(board) {
+  const container = board.el.querySelector('.board-body');
+  if (!board.departures.length) {
+    container.innerHTML = '<div class="led-board"><div class="led-empty">keine Abfahrten</div></div>';
+    return;
+  }
+  container.innerHTML = groupByPlatform(board.departures).map(([platform, deps]) => {
+    const rows = deps.map(d => {
+      const eta = minutesUntil(d.realtime || d.planned);
+      const delayed = !d.cancelled && typeof d.delay_minutes === 'number' && d.delay_minutes > 0;
+      const etaText = d.cancelled ? 'Entfällt'
+        : delayed ? `${fmtTime(d.realtime)}<span class="delay-tag">+${d.delay_minutes}</span>`
+        : eta === null ? '—' : eta <= 0 ? 'Sofort' : `${eta} Min`;
+      return `<div class="led-row${d.cancelled ? ' cancelled' : ''}">
+        <span class="led-num">${d.line}</span>
+        <span class="led-dest">${d.direction}</span>
+        <span class="led-eta">${etaText}</span>
+      </div>`;
+    }).join('');
+    const label = platform ? `Steig ${platform}` : 'Ohne Steig-Angabe';
+    return `<div class="led-board">
+      <div class="led-head"><span>${label}</span><span class="led-clock">${headClock()}</span></div>
+      ${rows}
+    </div>`;
+  }).join('');
+}
+
+async function refreshBoard(board) {
+  try {
+    const res = await fetch(`api/departures?stop_id=${encodeURIComponent(board.id)}&max=15`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    board.departures = data.departures || [];
+    renderBoardRows(board);
+  } catch (err) {
+    board.el.querySelector('.board-body').innerHTML =
+      `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry-board="${board.id}">Erneut versuchen</button></div>`;
+  }
+}
+
+function addBoard(id, name) {
+  let board = boards.get(id);
+  if (board) {
+    board.name = name;
+    renderBoardHead(board);
+    board.el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return board;
+  }
+  const el = document.createElement('div');
+  el.className = 'stop-board';
+  el.dataset.stopId = id;
+  el.innerHTML = `
+    <div class="stop-board-head"></div>
+    <div class="board-body board-group"><div class="skeleton" style="height:110px;background:#050505"></div></div>
+    <div class="led-board board-ticker" style="display:none"><div class="led-ticker"></div></div>`;
+  document.getElementById('boards').appendChild(el);
+
+  board = { id, name, departures: [], refreshTimer: null, countdownTimer: null, el };
+  boards.set(id, board);
+  renderBoardHead(board);
+  updateEmptyState();
+
+  refreshBoard(board);
+  renderBoardTicker(board);
+  board.refreshTimer = setInterval(() => refreshBoard(board), 30000);
+  board.countdownTimer = setInterval(() => renderBoardRows(board), 15000);
+  return board;
+}
+
+function removeBoard(id) {
+  const board = boards.get(id);
+  if (!board) return;
+  clearInterval(board.refreshTimer);
+  clearInterval(board.countdownTimer);
+  board.el.remove();
+  boards.delete(id);
+  updateEmptyState();
+}
+
+function toggleBoardFavorite(id, name) {
+  if (isConfigFav(id)) return; // fest über App-Konfiguration, nicht umschaltbar
   const local = new Set(loadLocalFavs());
   if (local.has(id)) local.delete(id); else { local.add(id); saveFavName(id, name); }
   saveLocalFavs([...local]);
-  renderFavorites();
+  const board = boards.get(id);
+  if (board) renderBoardHead(board);
   renderResultsCache();
 }
+
+// --- Search --------------------------------------------------------------
 
 let lastResults = [];
 
@@ -86,27 +238,26 @@ function renderResultsCache() {
 }
 
 function renderStopList(container, stops) {
-  const favs = favIds();
   container.innerHTML = '';
   for (const s of stops) {
     const li = document.createElement('li');
-    li.addEventListener('click', () => loadBoard(s.ext_id, s.name));
+    li.addEventListener('click', () => addBoard(s.ext_id, s.name));
     const label = document.createElement('span');
     label.textContent = s.name;
     label.title = `ext_id: ${s.ext_id} (für die favorite_stop_ids-Option)`;
-    const id = document.createElement('span');
-    id.className = 'stop-id';
-    id.textContent = s.ext_id;
+    const fav = favIcon(s.ext_id);
     const star = document.createElement('span');
-    const locked = isConfigFav(s.ext_id);
-    star.className = 'fav' + (favs.has(s.ext_id) ? ' active' : '');
-    star.textContent = locked ? '🔒' : favs.has(s.ext_id) ? '★' : '☆';
-    star.title = locked
-      ? 'Fest über App-Konfiguration favorisiert (favorite_stop_ids)'
-      : 'Favorit umschalten (nur in diesem Browser gespeichert)';
-    if (!locked) star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(s.ext_id, s.name); });
+    star.className = 'fav' + (fav.active ? ' active' : '');
+    star.textContent = fav.icon;
+    star.title = fav.title;
+    if (!isConfigFav(s.ext_id)) {
+      star.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleBoardFavorite(s.ext_id, s.name);
+        if (!boards.has(s.ext_id) && isLocalFav(s.ext_id)) addBoard(s.ext_id, s.name);
+      });
+    }
     li.appendChild(label);
-    li.appendChild(id);
     li.appendChild(star);
     container.appendChild(li);
   }
@@ -129,6 +280,34 @@ async function search() {
   }
 }
 
+// --- Service alerts, filtered per stop and shown inside each board -------
+// The HAFAS alert feed only names affected stops (by full stop name), not
+// line ids — a mention of "Linie 1" only ever appears in the free-text
+// message, so filtering can only match on the board's own stop name.
+
+let allAlerts = [];
+
+function renderBoardTicker(board) {
+  const wrap = board.el.querySelector('.board-ticker');
+  const box = wrap.querySelector('.led-ticker');
+  const relevant = allAlerts.filter(a => (a.stops || []).includes(board.name));
+  const text = relevant.map(a => a.text).filter(Boolean).join('   •   ');
+  if (!text) { wrap.style.display = 'none'; return; }
+  const duration = Math.max(16, text.length * 0.25);
+  wrap.style.display = '';
+  box.innerHTML = `<span class="track" style="animation-duration:${duration}s">${text}</span>`;
+}
+
+async function refreshAlertsCache() {
+  try {
+    const res = await fetch('api/alerts');
+    if (!res.ok) return;
+    const data = await res.json();
+    allAlerts = data.alerts || [];
+  } catch (err) { /* keep previous cache, retry next tick */ }
+  for (const board of boards.values()) renderBoardTicker(board);
+}
+
 async function resolveMissingFavNames(ids) {
   const names = loadFavNames();
   const missing = ids.filter((id) => !names[id]);
@@ -144,170 +323,47 @@ async function resolveMissingFavNames(ids) {
   return names;
 }
 
-async function renderFavorites() {
-  const container = document.getElementById('favorites');
-  const ids = [...favIds()];
-  if (!ids.length) { container.innerHTML = '<li class="empty">noch keine Favoriten — Haltestelle oben markieren</li>'; return; }
-  const names = await resolveMissingFavNames(ids);
-  container.innerHTML = '';
-  for (const id of ids) {
-    const li = document.createElement('li');
-    li.addEventListener('click', () => loadBoard(id, names[id] || id));
-    const label = document.createElement('span');
-    label.textContent = names[id] || id;
-    const star = document.createElement('span');
-    const locked = isConfigFav(id);
-    star.className = 'fav active';
-    star.textContent = locked ? '🔒' : '★';
-    star.title = locked
-      ? 'Fest über App-Konfiguration favorisiert (favorite_stop_ids)'
-      : 'Favorit entfernen (nur in diesem Browser gespeichert)';
-    if (!locked) star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(id, names[id] || id); });
-    li.appendChild(label);
-    li.appendChild(star);
-    container.appendChild(li);
-  }
-}
-
-function fmtTime(hafas) {
-  if (!hafas) return '—';
-  const t = hafas.slice(-6);
-  return `${t.slice(0, 2)}:${t.slice(2, 4)}`;
-}
-
-function minutesUntil(hafas) {
-  if (!hafas || hafas.length < 4) return null;
-  const now = new Date();
-  const h = parseInt(hafas.slice(-6, -4), 10), m = parseInt(hafas.slice(-4, -2), 10);
-  const target = new Date(now);
-  target.setHours(h, m, 0, 0);
-  let diff = Math.round((target - now) / 60000);
-  if (diff < -60) diff += 1440;
-  return diff;
-}
-
-function headDate() {
-  const now = new Date();
-  const dd = String(now.getDate()).padStart(2, '0');
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  return `${WEEKDAYS[now.getDay()]} ${dd}.${mm}.${now.getFullYear()}`;
-}
-function headClock() {
-  const now = new Date();
-  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-}
-
-function renderBoard(data) {
-  const board = document.getElementById('board');
-  boardDepartures = data.departures || [];
-  board.innerHTML = `<div class="led-strip"><span id="ledDate">${headDate()}</span></div>
-    <div id="boardPlatforms"></div>
-    <div class="led-board" id="boardTickerWrap"><div id="boardTicker"></div></div>`;
-  renderBoardRows();
-  clearInterval(clockTimer);
-  clockTimer = setInterval(() => {
-    document.querySelectorAll('.led-clock').forEach(c => { c.textContent = headClock(); });
-  }, 1000);
-  loadTicker();
-}
-
-function groupByPlatform(deps) {
-  const groups = new Map();
-  for (const d of deps) {
-    const key = d.platform ? String(d.platform) : '';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(d);
-  }
-  return [...groups.entries()].sort(([a], [b]) => {
-    if (a === '') return 1;
-    if (b === '') return -1;
-    const na = parseInt(a, 10), nb = parseInt(b, 10);
-    if (!isNaN(na) && !isNaN(nb)) return na - nb;
-    return a.localeCompare(b);
-  });
-}
-
-function renderBoardRows() {
-  const container = document.getElementById('boardPlatforms');
-  if (!container) return;
-  if (!boardDepartures.length) { container.innerHTML = '<div class="led-board"><div class="led-empty">keine Abfahrten</div></div>'; return; }
-  container.innerHTML = groupByPlatform(boardDepartures).map(([platform, deps]) => {
-    const rows = deps.map(d => {
-      const eta = minutesUntil(d.realtime || d.planned);
-      const etaText = d.cancelled ? 'Entfällt' : eta === null ? '—' : eta <= 0 ? 'Sofort' : `${eta} Min`;
-      return `<div class="led-row${d.cancelled ? ' cancelled' : ''}">
-        <span class="led-num">${d.line}</span>
-        <span class="led-dest">${d.direction}</span>
-        <span class="led-eta">${etaText}</span>
-      </div>`;
-    }).join('');
-    const label = platform ? `Steig ${platform}` : 'Ohne Steig-Angabe';
-    return `<div class="led-board">
-      <div class="led-head"><span>${label}</span><span class="led-clock">${headClock()}</span></div>
-      ${rows}
-    </div>`;
-  }).join('');
-}
-
-async function loadTicker() {
-  const wrap = document.getElementById('boardTickerWrap');
-  const box = document.getElementById('boardTicker');
-  if (!box || !wrap) return;
-  try {
-    const res = await fetch('api/alerts');
-    if (!res.ok) { wrap.style.display = 'none'; return; }
-    const data = await res.json();
-    const relevant = (data.alerts || []).filter(a => !currentStopId || !a.stops?.length || a.stops.includes(currentStopId));
-    const text = relevant.map(a => a.text).filter(Boolean).join('   •   ');
-    if (!text) { wrap.style.display = 'none'; return; }
-    const duration = Math.max(16, text.length * 0.25);
-    wrap.style.display = '';
-    box.innerHTML = `<div class="led-ticker"><span class="track" style="animation-duration:${duration}s">${text}</span></div>`;
-  } catch (err) {
-    wrap.style.display = 'none';
-  }
-}
-
-async function refreshBoard() {
-  if (!currentStopId) return;
-  try {
-    const res = await fetch(`api/departures?stop_id=${encodeURIComponent(currentStopId)}&max=15`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
-    boardDepartures = data.departures || [];
-    renderBoardRows();
-  } catch (err) {
-    document.getElementById('board').innerHTML =
-      `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="board">Erneut versuchen</button></div>`;
-  }
-}
-
-function loadBoard(id, name) {
-  currentStopId = id;
-  currentStopName = name;
-  clearInterval(boardTimer);
-  clearInterval(countdownTimer);
-  clearInterval(clockTimer);
-  document.getElementById('board').innerHTML = '<div class="skeleton" style="height:140px;background:#050505"></div>';
-  renderBoard({ departures: [] });
-  refreshBoard();
-  boardTimer = setInterval(refreshBoard, 30000);
-  countdownTimer = setInterval(renderBoardRows, 15000);
-}
-
 async function init() {
   try {
     const res = await fetch('api/config');
     if (res.ok) cfg = await res.json();
   } catch (err) { /* defaults */ }
-  renderFavorites();
+
+  document.getElementById('boardsDate').textContent = headDate();
+
+  const favIds = [...new Set([...(cfg.favorite_stop_ids || []), ...loadLocalFavs()])];
+  document.getElementById('stopSearch').open = favIds.length === 0;
+
+  if (favIds.length) {
+    const names = await resolveMissingFavNames(favIds);
+    for (const id of favIds) addBoard(id, names[id] || id);
+  } else {
+    updateEmptyState();
+  }
+
+  refreshAlertsCache();
+  alertsCacheTimer = setInterval(refreshAlertsCache, 300000);
+
   document.getElementById('searchBtn').addEventListener('click', search);
   document.getElementById('query').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+
+  document.getElementById('boards').addEventListener('click', (e) => {
+    const favBtn = e.target.closest('.fav-toggle');
+    const closeBtn = e.target.closest('.board-close');
+    const retryBtn = e.target.closest('[data-retry-board]');
+    const card = e.target.closest('.stop-board');
+    if (!card) return;
+    const id = card.dataset.stopId;
+    const board = boards.get(id);
+    if (favBtn) toggleBoardFavorite(id, board.name);
+    else if (closeBtn) removeBoard(id);
+    else if (retryBtn) refreshBoard(board);
+  });
+
   document.body.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-retry]');
     if (!btn) return;
     if (btn.dataset.retry === 'search') search();
-    else if (btn.dataset.retry === 'board') refreshBoard();
   });
 }
 
