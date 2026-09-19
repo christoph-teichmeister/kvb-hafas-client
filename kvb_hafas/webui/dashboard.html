@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -21,7 +21,7 @@
   <p class="subtitle"><span class="live-dot" id="liveDot" style="display:none"></span> <span id="liveLabel">Live</span></p>
 
   <h2>Live</h2>
-  <div class="stat-grid" id="liveTiles">
+  <div class="stat-grid" id="liveTiles" role="region" aria-live="polite">
     <div class="stat-row"><div class="skeleton stat-skeleton"></div></div>
     <div class="stat-row"><div class="skeleton stat-skeleton"></div></div>
     <div class="stat-row"><div class="skeleton stat-skeleton"></div></div>
@@ -29,13 +29,18 @@
   </div>
 
   <h2>Verspätungen (historisch)</h2>
-  <div class="stat-grid" id="delayTiles"></div>
+  <div class="stat-grid" id="delayTiles" role="region" aria-live="polite"></div>
   <h2>Unpünktlichste Linien</h2>
   <div id="leastPunctual"></div>
   <div class="note" id="historyNote"></div>
 </main>
 <script>
 let refreshSeconds = 15;
+
+function friendlyError(err) {
+  if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
+  return err.message || 'Unbekannter Fehler';
+}
 
 function statRow(value, label, trend) {
   const t = trend ? `<span class="trend ${trend > 0 ? 'up' : 'down'}">${trend > 0 ? '▲' : '▼'}${Math.abs(trend)}</span>` : '';
@@ -67,7 +72,7 @@ async function refreshLive() {
   } catch (err) {
     dot.style.display = 'none';
     label.textContent = '';
-    box.innerHTML = `<div class="err">${err.message}</div>`;
+    box.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="live">Erneut versuchen</button></div>`;
   }
 }
 
@@ -105,7 +110,7 @@ async function refreshDelays() {
          <tbody>${rows}</tbody></table>`
       : '<div class="empty">noch nicht genug Verlaufsdaten</div>';
   } catch (err) {
-    box.innerHTML = `<div class="err">${err.message}</div>`;
+    box.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="delays">Erneut versuchen</button></div>`;
     table.innerHTML = '';
   }
 }
@@ -125,6 +130,12 @@ async function init() {
   } catch (err) { /* defaults */ }
   refreshAll();
   setInterval(refreshAll, refreshSeconds * 1000);
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-retry]');
+    if (!btn) return;
+    if (btn.dataset.retry === 'live') refreshLive();
+    else if (btn.dataset.retry === 'delays') refreshDelays();
+  });
 }
 
 init();

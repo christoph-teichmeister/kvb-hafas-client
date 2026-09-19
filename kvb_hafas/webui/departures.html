@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KVB Departures</title>
+<title>KVB Abfahrten</title>
 <link rel="stylesheet" href="shared.css">
 </head>
 <body>
@@ -24,13 +24,13 @@
     <input type="text" id="query" placeholder="z.B. Neumarkt">
     <button id="searchBtn">Suchen</button>
   </div>
-  <ul class="stops" id="results"></ul>
+  <ul class="stops" id="results" aria-live="polite"></ul>
 
   <h2>Favoriten</h2>
   <ul class="stops" id="favorites"></ul>
 
   <h2>Abfahrtstafel</h2>
-  <div id="board" class="board-group"><div class="led-board"><div class="led-empty">Haltestelle suchen oder Favorit oben auswählen.</div></div></div>
+  <div id="board" class="board-group" role="region" aria-live="polite"><div class="led-board"><div class="led-empty">Haltestelle suchen oder Favorit oben auswählen.</div></div></div>
 </main>
 <script>
 const FAV_KEY = 'kvb-departures-favorites';
@@ -40,6 +40,11 @@ let cfg = { favorite_stop_ids: [] };
 let currentStopId = null, currentStopName = null;
 let boardTimer = null, countdownTimer = null, clockTimer = null;
 let boardDepartures = [];
+
+function friendlyError(err) {
+  if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
+  return err.message || 'Unbekannter Fehler';
+}
 
 function loadLocalFavs() {
   try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
@@ -61,7 +66,12 @@ function favIds() {
   return new Set([...(cfg.favorite_stop_ids || []), ...loadLocalFavs()]);
 }
 
+function isConfigFav(id) {
+  return (cfg.favorite_stop_ids || []).includes(id);
+}
+
 function toggleFav(id, name) {
+  if (isConfigFav(id)) return; // fest über App-Konfiguration, nicht per Klick entfernbar
   const local = new Set(loadLocalFavs());
   if (local.has(id)) local.delete(id); else { local.add(id); saveFavName(id, name); }
   saveLocalFavs([...local]);
@@ -88,10 +98,13 @@ function renderStopList(container, stops) {
     id.className = 'stop-id';
     id.textContent = s.ext_id;
     const star = document.createElement('span');
+    const locked = isConfigFav(s.ext_id);
     star.className = 'fav' + (favs.has(s.ext_id) ? ' active' : '');
-    star.textContent = favs.has(s.ext_id) ? '★' : '☆';
-    star.title = 'Favorit umschalten';
-    star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(s.ext_id, s.name); });
+    star.textContent = locked ? '🔒' : favs.has(s.ext_id) ? '★' : '☆';
+    star.title = locked
+      ? 'Fest über App-Konfiguration favorisiert (favorite_stop_ids)'
+      : 'Favorit umschalten (nur in diesem Browser gespeichert)';
+    if (!locked) star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(s.ext_id, s.name); });
     li.appendChild(label);
     li.appendChild(id);
     li.appendChild(star);
@@ -112,7 +125,7 @@ async function search() {
     renderResultsCache();
     if (!lastResults.length) results.innerHTML = '<li class="empty">keine Treffer</li>';
   } catch (err) {
-    results.innerHTML = `<li class="err">${err.message}</li>`;
+    results.innerHTML = `<li class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="search">Erneut versuchen</button></li>`;
   }
 }
 
@@ -143,9 +156,13 @@ async function renderFavorites() {
     const label = document.createElement('span');
     label.textContent = names[id] || id;
     const star = document.createElement('span');
+    const locked = isConfigFav(id);
     star.className = 'fav active';
-    star.textContent = '★';
-    star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(id, names[id] || id); });
+    star.textContent = locked ? '🔒' : '★';
+    star.title = locked
+      ? 'Fest über App-Konfiguration favorisiert (favorite_stop_ids)'
+      : 'Favorit entfernen (nur in diesem Browser gespeichert)';
+    if (!locked) star.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(id, names[id] || id); });
     li.appendChild(label);
     li.appendChild(star);
     container.appendChild(li);
@@ -260,7 +277,8 @@ async function refreshBoard() {
     boardDepartures = data.departures || [];
     renderBoardRows();
   } catch (err) {
-    document.getElementById('board').innerHTML = `<div class="err">${err.message}</div>`;
+    document.getElementById('board').innerHTML =
+      `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="board">Erneut versuchen</button></div>`;
   }
 }
 
@@ -285,6 +303,12 @@ async function init() {
   renderFavorites();
   document.getElementById('searchBtn').addEventListener('click', search);
   document.getElementById('query').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-retry]');
+    if (!btn) return;
+    if (btn.dataset.retry === 'search') search();
+    else if (btn.dataset.retry === 'board') refreshBoard();
+  });
 }
 
 init();

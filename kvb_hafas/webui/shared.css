@@ -229,6 +229,11 @@ ul.stops li .fav.active { color: #d69400; }
 
 .empty, .note { color: var(--text-secondary); padding: 10px 0; font-size: 13px; }
 .err { color: var(--negative); padding: 10px; background: var(--negative-tint); border-radius: var(--radius-sm); font-size: 13px; }
+.err .retry {
+  margin-left: 8px; padding: 3px 9px; border: 1px solid var(--negative); border-radius: var(--radius-sm);
+  background: transparent; color: var(--negative); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.err .retry:hover { background: var(--negative); color: var(--accent-contrast); }
 
 .skeleton { background: linear-gradient(90deg, var(--surface-sunken) 25%, var(--border) 37%, var(--surface-sunken) 63%);
             background-size: 400% 100%; animation: shimmer 1.4s ease infinite; border-radius: var(--radius-sm); }
@@ -268,7 +273,7 @@ footer.app-footer { max-width: 960px; margin: 0 auto; padding: 0 16px 24px; colo
 .led-row {
   display: grid; grid-template-columns: 30px 1fr 58px; gap: 10px; align-items: baseline;
   padding: 6px 0; color: #ffb020; font-weight: 700; font-size: 16px; letter-spacing: .01em;
-  text-shadow: 0 0 7px rgb(255 159 28 / .55), 0 0 1px rgb(255 176 32 / .9);
+  text-shadow: 0 0 3px rgb(255 159 28 / .35), 0 0 1px rgb(255 176 32 / .8);
 }
 .led-row.cancelled { color: #a8721f; text-shadow: none; }
 .led-row .led-num { text-align: center; }
