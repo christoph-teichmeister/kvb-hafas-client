@@ -7,38 +7,56 @@ from __future__ import annotations
 
 from typing import Any
 
-from kvb_hafas.webui.is_kvb_local import css_class, is_kvb_local
+from kvb_hafas.webui.is_kvb_local import css_class
 
 
-def live_stats(vehicles: list[dict[str, Any]], late_from: int = 3) -> dict[str, Any]:
+def live_stats(vehicles: list[dict[str, Any]], late_from: int = 3, mode: str | None = None) -> dict[str, Any]:
     """Compute live stats straight from an already-fetched vehicle list.
 
-    - max current delay across vehicles with realtime data
-    - vehicle count per line (which line currently has the most vehicles out)
+    - max current delay across vehicles with realtime data, plus which vehicle
+    - vehicle count per line (which line currently has the most vehicles out), plus that count
     - count of currently-delayed vehicles (delay >= late_from)
-    - vehicle count per mode (tram/bus/rail)
+
+    `mode` ("tram"/"bus"/"rail"), when given, restricts the vehicle list to
+    that mode (via css_class) before any aggregation, so every returned
+    number is scoped to it.
     """
+    if mode:
+        vehicles = [v for v in vehicles if css_class(v.get("category")) == mode]
+
     per_line: dict[str, int] = {}
-    per_mode: dict[str, int] = {"tram": 0, "bus": 0, "rail": 0}
-    delays = [v["delay"] for v in vehicles if v.get("delay") is not None]
-    delayed_count = sum(1 for d in delays if d >= late_from)
+    delays_with_vehicle: list[tuple[int, dict[str, Any]]] = []
 
     for v in vehicles:
         line = v.get("line") or "?"
         per_line[line] = per_line.get(line, 0) + 1
-        mode = css_class(v.get("category"))
-        per_mode[mode] = per_mode.get(mode, 0) + 1
+        if v.get("delay") is not None:
+            delays_with_vehicle.append((v["delay"], v))
 
-    busiest_line = max(per_line.items(), key=lambda kv: kv[1])[0] if per_line else None
+    delayed_count = sum(1 for d, _ in delays_with_vehicle if d >= late_from)
+
+    busiest_line: str | None = None
+    busiest_line_count = 0
+    if per_line:
+        busiest_line, busiest_line_count = max(per_line.items(), key=lambda kv: kv[1])
+
+    max_delay_entry = max(delays_with_vehicle, key=lambda t: t[0], default=None)
+    max_delay_vehicle = None
+    if max_delay_entry is not None:
+        _, veh = max_delay_entry
+        max_delay_vehicle = {
+            "jid": veh.get("jid"),
+            "line": veh.get("line"),
+            "direction": veh.get("direction"),
+        }
 
     return {
         "vehicle_count": len(vehicles),
         "vehicles_per_line": dict(sorted(per_line.items(), key=lambda kv: -kv[1])),
-        "vehicles_per_mode": per_mode,
         "busiest_line": busiest_line,
-        "max_current_delay_minutes": max(delays) if delays else None,
+        "busiest_line_count": busiest_line_count,
+        "max_current_delay_minutes": max_delay_entry[0] if max_delay_entry else None,
+        "max_current_delay_vehicle": max_delay_vehicle,
         "delayed_vehicle_count": delayed_count,
         "delayed_threshold_minutes": late_from,
-        "vehicles_with_realtime": len(delays),
-        "local_vehicle_count": sum(1 for v in vehicles if is_kvb_local(v.get("category"))),
     }

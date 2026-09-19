@@ -18,6 +18,7 @@
   .veh-bus  { background: #06c; }
   .veh-rail { background: #444; }
   .veh.late { border-color: #fc0; box-shadow: 0 0 0 2px #fc0, 0 1px 4px rgba(0,0,0,.4); }
+  .veh.highlight { border-color: #0af; box-shadow: 0 0 0 3px #0af, 0 1px 4px rgba(0,0,0,.4); }
   .veh .d { font-weight: 400; opacity: .9; }
   .panel { position: absolute; z-index: 1000; background: var(--surface-elevated);
            color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -178,6 +179,13 @@ let status, alertList;
 const fleet = new Map();
 let pollTimer = null, moveTimer = null, lastPayload = null;
 
+// Deep-link support: dashboard.html's max-delay tile links here with
+// ?line=<line>&jid=<jid> to pre-filter and pan/highlight one vehicle.
+const deepLinkParams = new URLSearchParams(location.search);
+const deepLinkLine = deepLinkParams.get('line');
+const deepLinkJid = deepLinkParams.get('jid');
+let deepLinkHandled = !(deepLinkLine || deepLinkJid);
+
 const CAT_COLOURS = [[/s-?bahn/, '#008d4f'], [/ice|^ic$|fern|tha|flx/, '#ec0016'], [/re|rb|regio|sev/, '#646973']];
 
 function lineColour(colour, category) {
@@ -219,8 +227,10 @@ function icon(v) {
   const suffix = late ? ` <span class="d">+${v.delay}</span>` : '';
   const colour = lineColour(v.colour, v.category);
   const style = colour ? ` style="background:${colour};color:${v.colour === colour ? (v.text_colour || '#fff') : '#fff'}"` : '';
+  const highlighted = deepLinkJid && v.jid === deepLinkJid;
+  const cls = `veh veh-${cssClass(v.category)}${late ? ' late' : ''}${highlighted ? ' highlight' : ''}`;
   return L.divIcon({ className: '', iconSize: null,
-    html: `<div class="veh veh-${cssClass(v.category)}${late ? ' late' : ''}"${style}>${v.line}${suffix}</div>` });
+    html: `<div class="${cls}"${style}>${v.line}${suffix}</div>` });
 }
 
 function popup(v) {
@@ -292,6 +302,21 @@ function apply(data) {
     if (!seen.has(jid)) { vehicleLayer.removeLayer(entry.marker); fleet.delete(jid); }
   }
   render(data);
+  tryDeepLinkFocus();
+}
+
+function tryDeepLinkFocus() {
+  if (deepLinkHandled) return;
+  deepLinkHandled = true; // attempt exactly once, even if the jid never shows up
+  if (!deepLinkJid) return; // line-only deep link: the #lines filter already applied
+  const entry = fleet.get(deepLinkJid);
+  if (!entry) {
+    status.textContent = `Fahrzeug ist derzeit nicht aktiv — Filter auf Linie ${deepLinkLine || ''} angewendet.`;
+    return;
+  }
+  show(entry, true);
+  map.setView(entry.marker.getLatLng(), Math.max(map.getZoom(), 16));
+  entry.marker.openPopup();
 }
 
 function show(entry, visible) {
@@ -642,6 +667,12 @@ async function init() {
   initAlertCollapse();
 
   loadPrefs();
+  if (deepLinkLine) {
+    // Overrides whatever loadPrefs() just restored, for this load only —
+    // deliberately not saved via savePrefs(), so a dashboard click-through
+    // never becomes the new persisted filter default.
+    document.getElementById('lines').value = deepLinkLine;
+  }
   schedule();
   toggleAlerts();
   toggleNetwork();
