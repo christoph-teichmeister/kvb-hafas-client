@@ -12,6 +12,7 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/leaflet.markercluster.js"></script>
 <style>
+  :root { --controls-gap: 0px; }
   body { display: flex; flex-direction: column; }
   #map { flex: 1; min-height: 0; }
   .veh { border-radius: 10px; color: #fff; font-weight: 700; font-size: 11px;
@@ -70,8 +71,9 @@
     font-size: 12px; cursor: pointer;
   }
   #reset-filters:hover { background: var(--surface-sunken); color: var(--text-primary); }
-  #status { left: 10px; bottom: 10px; max-width: 60vw; font-size: 12px;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+  #status { left: 10px; bottom: calc(10px + var(--controls-gap)); max-width: 60vw; font-size: 12px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help;
+            transition: bottom .15s ease; }
   #status.error { background: var(--negative-tint); color: var(--negative); }
   #tilewarn { top: 62px; left: 50%; translate: -50% 0; max-width: min(90vw, 480px);
               background: var(--negative-tint); color: var(--negative); }
@@ -620,6 +622,18 @@ function initPrefetchInfoToggle() {
   });
 }
 
+function initControlsGap() {
+  const controls = document.getElementById('controls');
+  const mq = window.matchMedia('(max-width: 640px)');
+  const update = () => {
+    document.documentElement.style.setProperty('--controls-gap',
+      mq.matches ? `${controls.getBoundingClientRect().height + 8}px` : '0px');
+  };
+  new ResizeObserver(update).observe(controls);
+  mq.addEventListener('change', update);
+  update();
+}
+
 function initAlertCollapse() {
   alertList.addEventListener('click', (e) => {
     const head = e.target.closest('#alert-head');
@@ -746,6 +760,7 @@ async function init() {
   map.on('moveend', () => { clearTimeout(moveTimer); moveTimer = setTimeout(schedule, 400); });
   map.on('zoomend', drawStops);
   initControlsCollapse();
+  initControlsGap();
   initPrefetchInfoToggle();
   initAlertCollapse();
 
