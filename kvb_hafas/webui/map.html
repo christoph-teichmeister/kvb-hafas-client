@@ -4,9 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KVB Live-Karte</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="vendor/MarkerCluster.css">
+<link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
 <link rel="stylesheet" href="shared.css">
 <script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet.markercluster.js"></script>
 <style>
   body { display: flex; flex-direction: column; }
   #map { flex: 1; min-height: 0; }
@@ -25,6 +29,13 @@
     display: block; padding: 0; text-align: center;
   }
   .locate-btn:hover { background: var(--surface-sunken); }
+  /* Neutral gray clusters instead of the library's default green/yellow/orange
+     — those would read as a 4th, unrelated mode color next to the existing
+     tram/bus/rail marker color-coding. */
+  .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background-color: rgba(68, 68, 68, .45); }
+  .marker-cluster-small div, .marker-cluster-medium div, .marker-cluster-large div {
+    background-color: rgba(68, 68, 68, .85); color: #fff; font-weight: 700;
+  }
   .veh .d { font-weight: 400; opacity: .9; }
   .panel { position: absolute; z-index: 1000; background: var(--surface-elevated);
            color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -321,8 +332,17 @@ function tryDeepLinkFocus() {
     return;
   }
   show(entry, true);
-  map.setView(entry.marker.getLatLng(), Math.max(map.getZoom(), 16));
-  entry.marker.openPopup();
+  const focus = () => {
+    map.setView(entry.marker.getLatLng(), Math.max(map.getZoom(), 16));
+    entry.marker.openPopup();
+  };
+  // The marker may currently be clustered — zoomToShowLayer un-clusters/
+  // spiderfies it first, then calls back once it's safe to open the popup.
+  if (typeof vehicleLayer.zoomToShowLayer === 'function') {
+    vehicleLayer.zoomToShowLayer(entry.marker, focus);
+  } else {
+    focus();
+  }
 }
 
 function show(entry, visible) {
@@ -696,7 +716,12 @@ async function init() {
   map.addControl(new LocateControl());
   networkLayer = L.layerGroup();
   stopLayer = L.layerGroup();
-  vehicleLayer = L.layerGroup().addTo(map);
+  vehicleLayer = L.markerClusterGroup({
+    maxClusterRadius: 50,
+    disableClusteringAtZoom: 15,
+    showCoverageOnHover: false,
+    spiderfyOnMaxZoom: false,
+  }).addTo(map);
   alertLayer = L.layerGroup();
 
   status = document.getElementById('status');
