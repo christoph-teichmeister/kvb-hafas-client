@@ -1,6 +1,6 @@
 [project]
 name = "kvb-hafas-client"
-version = "2026.9.0"
+version = "2026.9.1"
 description = "Inoffizieller Python-Client für die HAFAS-Echtzeitdaten der KVB (Kölner Verkehrs-Betriebe)"
 readme = "README.md"
 license = "MIT"
