@@ -8,8 +8,10 @@ Inoffizieller Python-Client für die Echtzeit-Fahrplandaten der **KVB** (Kölner
 Verkehrs-Betriebe AG), Köln — Haltestellensuche, Live-Abfahrten, Verbindungen
 und Störungsmeldungen, ohne offizielle API.
 
-Ein Kartenfrontend, das diesen Client nutzt, gibt es unter
-[kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map).
+Live-Karte, Departures-Board und Stats-Dashboard laufen direkt hier mit
+(`uv run map_server.py`, siehe unten). Als Home Assistant Add-on gibt es dafür
+zusätzlich [kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map)
+— eine dünne Docker/Ingress-Hülle, die genau diesen Server importiert.
 
 ## Hintergrund
 
@@ -65,15 +67,25 @@ Störungsmeldungen, Isochrone, Live-Fahrzeuge, Liniendetails, Serverinfo:
 uv run main.py
 ```
 
-Live-Karte, Haltestellen-Board und Verspätungs-Statistiken im Browser — die
-volle Web-UI lebt nicht mehr in diesem Repo, sondern im
-[kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map) Home
-Assistant Add-on, das diese Library als Dependency zieht. Dieses Repo liefert
-die UI-Assets nur noch als Package-Daten mit: `kvb_hafas/webui/` enthält die
-vier HTML-Seiten (`index.html`, `map.html`, `departures.html`,
-`dashboard.html`), `shared.css`, vendored Leaflet (`vendor/`) sowie
-`is_kvb_local.py` (Bucketing-Helfer für lokale vs. durchfahrende Linien) — zum
-lokalen Ausprobieren siehe stattdessen `kvb-ha-map`.
+Live-Karte, Haltestellen-Board und Verspätungs-Statistiken im Browser:
+
+```bash
+uv run map_server.py
+```
+
+Startet auf `http://localhost:8099` — Vehicle-/Alert-/Netz-/Stops-Endpunkte,
+Geometrie-Prefetch und SQLite-Vehicle-History laufen komplett hier
+(`kvb_hafas/server/`), keine externen Dependencies über `requests` hinaus.
+Konfiguration über Env-Vars (`PORT`, `HISTORY_ENABLED`,
+`HISTORY_SAMPLE_INTERVAL_SECONDS`, `VEHICLE_POLL_CACHE_TTL_SECONDS`,
+`DEFAULT_MAP_CENTER_LAT`/`_LON`, `TILE_URL`/`TILE_ATTRIBUTION`, …) — Defaults
+siehe `kvb_hafas/server/http_server.py`.
+
+Das [kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map) Home
+Assistant Add-on ist nur noch eine dünne Docker/Ingress-Hülle darum: es zieht
+diese Library als Dependency und startet
+`python -m kvb_hafas.server.http_server` direkt — kein eigener Server- oder
+UI-Code mehr dort, damit UI/Server nur an einer Stelle gepflegt werden.
 
 Gleise der DB-Produkte liegen fertig geroutet in `data/rail_geometry.json` im
 Repo — neu holen per `uv run tools/fetch_rail_geometry.py` nur bei
@@ -100,7 +112,12 @@ cli/            Interaktive Terminal-Oberfläche (questionary + rich)
   departures.py / trips.py / alerts.py / geo.py / network.py   je ein Menüpunkt
 timetable/      Fahrplan-Erhebung: fetch.py (einsammeln), analyze.py + analyze.sql (auswerten)
 main.py         Entry-Point der CLI
-kvb_hafas/webui/  UI-Assets fürs kvb-ha-map Add-on (Package-Daten, kein eigener Server hier)
+map_server.py   Entry-Point des Web-UI-Servers (uv run map_server.py)
+kvb_hafas/server/  HTTP-Server für die Web-UI (auch von kvb-ha-map importiert)
+  http_server.py  Handler + main(): Vehicle-/Alert-/Netz-/Stops-/Departures-Endpunkte, Geometrie-Prefetch
+  history_store.py  SQLite-Zeitreihe für Fahrzeugpositionen
+  stats.py          Live- und historische Verspätungsstatistiken
+kvb_hafas/webui/  UI-Assets (Package-Daten)
   index.html, map.html, departures.html, dashboard.html, shared.css
   is_kvb_local.py   Bucketing-Helfer: lokale (Tram/Bus) vs. durchfahrende Linien
   vendor/           Leaflet 1.9.4 lokal (leaflet.js/css + Marker-Images)

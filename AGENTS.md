@@ -9,7 +9,10 @@ Inoffizieller Python-Client für Echtzeit-Fahrplandaten der Kölner Verkehrs-Bet
 keine KVB-Markenverwendung.
 
 Companion-Repo: `kvb-ha-map` (Home Assistant Add-on), nutzt dieses Repo als ungepinnte Git-Dependency. Push auf `main`
-hier löst per `.github/workflows/notify-kvb-ha-map.yml` einen `repository_dispatch` dort aus.
+hier löst per `.github/workflows/notify-kvb-ha-map.yml` einen `repository_dispatch` dort aus. `kvb-ha-map` besitzt
+keinen eigenen Server-/UI-Code — es ist nur Docker/Ingress/Config-Verpackung um `kvb_hafas.server.http_server`, den es
+direkt aus diesem Repo importiert und startet (`python -m kvb_hafas.server.http_server`). Server und UI werden also
+ausschließlich hier gepflegt.
 
 ## Stack
 
@@ -24,10 +27,13 @@ hier löst per `.github/workflows/notify-kvb-ha-map.yml` einen `repository_dispa
 
 - `kvb_hafas/` — Kernbibliothek (`client.py`, `models.py`, `parsing.py`, `storage.py`)
 - `kvb_hafas/webui/` — statische Web-UI-Assets als Package-Data
+- `kvb_hafas/server/` — HTTP-Server für die Web-UI (`http_server.py` mit Handler/`main()`, `history_store.py`
+  SQLite-Fahrzeug-Historie, `stats.py` Live-/historische Verspätungsstatistiken); wird auch von `kvb-ha-map` importiert
 - `cli/` — interaktive Terminal-UI (`ui.py`, `format.py`, `departures.py`, `trips.py`, `alerts.py`, `geo.py`,
   `network.py`)
 - `timetable/` — Fahrplan-Erfassung (`fetch.py`, `analyze.py`/`analyze.sql`)
 - `main.py` — CLI-Einstiegspunkt
+- `map_server.py` — Einstiegspunkt des Web-UI-Servers (`uv run map_server.py`)
 - `tests/` — pytest, HTTP vollständig gemockt
 - `docs/API.md`, `docs/openapi.yaml` — API-Referenz
 
