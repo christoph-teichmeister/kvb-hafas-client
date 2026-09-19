@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.9.4] - 2026-09-19
+
+### Fixes
+- preserve last commit line when building changelog entries (#10)
+
+
 ## [2026.9.3] - 2026-09-19
 
 ### Features
