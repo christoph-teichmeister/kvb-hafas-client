@@ -1,0 +1,23 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master]
+
+  - repo: local
+    hooks:
+      - id: branch-name-lint
+        name: Enforce branch naming convention
+        entry: >-
+          bash -c '
+          branch="$(git symbolic-ref --short HEAD)";
+          if [[ "$branch" == "main" || "$branch" == "master" ]]; then exit 0; fi;
+          if ! [[ "$branch" =~ ^(feature|feat|fix|bugfix|hotfix|chore|docs|refactor|test|release)/[a-z0-9._-]+$ ]]; then
+            echo "Branch-Name \"$branch\" passt nicht zur Naming-Convention (z.B. feature/xyz, fix/xyz, chore/xyz).";
+            exit 1;
+          fi
+          '
+        language: system
+        pass_filenames: false
+        always_run: true
