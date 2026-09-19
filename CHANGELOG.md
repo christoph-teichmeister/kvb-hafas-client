@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.9.5] - 2026-09-19
+
+### Fixes
+- keep status bar clear of mobile filter panel (#11)
+
+
 ## [2026.9.4] - 2026-09-19
 
 ### Fixes
