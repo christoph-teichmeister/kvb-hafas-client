@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.9.7] - 2026-09-26
+
+### Fixes
+- correct departure countdowns and board labels (#13)
+
+
 ## [2026.9.6] - 2026-09-26
 
 ### Fixes
