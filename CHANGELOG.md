@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.9.6] - 2026-09-26
+
+### Fixes
+- self-heal corrupt SQLite DB and persist it in /data (#12)
+
+
 ## [2026.9.5] - 2026-09-19
 
 ### Fixes
