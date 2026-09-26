@@ -87,5 +87,5 @@ def test_board_hides_past_departures_and_labels_platforms(tz):
     )
     result = json.loads(out.stdout)
     assert result["upcoming"] == ["155000", "160500", ""]
-    assert result["labels"] == ["Steig 1", "Steig 2", "Steig A", "Ohne Steig-Angabe", "Ohne Steig-Angabe"]
+    assert result["labels"] == ["Steig 1", "Steig 2", "Steig A", "", ""]
     assert result["order"] == ["Steig 2", "Steig 10", ""]

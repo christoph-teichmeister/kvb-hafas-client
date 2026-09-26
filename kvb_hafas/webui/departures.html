@@ -141,8 +141,9 @@ function groupByPlatform(deps) {
 
 // Real dPlatf values are bare ("2", "A"); the mast fallback already reads
 // "Steig N" (see kvb_hafas.parsing._mast_steig) — don't prefix it twice.
+// No platform at all -> no label; the head then only carries the clock.
 function platformLabel(platform) {
-  if (!platform) return 'Ohne Steig-Angabe';
+  if (!platform) return '';
   return /^steig\b/i.test(platform) ? platform : `Steig ${platform}`;
 }
 
