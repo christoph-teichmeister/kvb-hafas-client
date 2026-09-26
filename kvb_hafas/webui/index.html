@@ -57,13 +57,33 @@
 </main>
 <footer class="app-footer">Inoffizieller Companion-Add-on für kvb-hafas-client. Keine Verbindung zur KVB.</footer>
 <script>
-function minutesUntil(hafas) {
+// HAFAS times are Cologne wall-clock (HHMMSS; a day-offset prefix refers to
+// the journey's operating day, so it is ignored). Compare against
+// Europe/Berlin, not the device's timezone — otherwise a phone abroad
+// (e.g. Greece, +1h) sees every departure within the next hour as already
+// gone ("Sofort").
+const BERLIN_PARTS = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Europe/Berlin', hourCycle: 'h23',
+  year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function berlinNow(date = new Date()) {
+  const p = {};
+  for (const { type, value } of BERLIN_PARTS.formatToParts(date)) p[type] = value;
+  return {
+    year: +p.year, month: +p.month, day: +p.day, weekday: WEEKDAY_INDEX[p.weekday],
+    hour: +p.hour, minute: +p.minute, second: +p.second,
+  };
+}
+
+function minutesUntil(hafas, date = new Date()) {
   if (!hafas || hafas.length < 4) return null;
-  const now = new Date();
+  const now = berlinNow(date);
   const h = parseInt(hafas.slice(-6, -4), 10), m = parseInt(hafas.slice(-4, -2), 10);
-  const target = new Date(now);
-  target.setHours(h, m, 0, 0);
-  let diff = Math.round((target - now) / 60000);
+  const nowMin = now.hour * 60 + now.minute + now.second / 60;
+  let diff = Math.round(h * 60 + m - nowMin);
   if (diff < -60) diff += 1440;
   return diff;
 }
@@ -89,10 +109,11 @@ async function loadFavPreview() {
     }
     const results = await Promise.all(ids.map(async (id) => {
       try {
-        const dep = await fetch(`api/departures?stop_id=${encodeURIComponent(id)}&max=1`);
+        const dep = await fetch(`api/departures?stop_id=${encodeURIComponent(id)}&max=3`);
         if (!dep.ok) return null;
         const data = await dep.json();
-        return (data.departures || [])[0] || null;
+        // Skip departures already gone in Cologne time.
+        return (data.departures || []).find(d => !d.cancelled && (minutesUntil(d.realtime || d.planned) ?? -1) >= 0) || null;
       } catch { return null; }
     }));
     const candidates = results
@@ -105,7 +126,7 @@ async function loadFavPreview() {
     }
     candidates.sort((a, b) => a.eta - b.eta);
     const { d: next, eta } = candidates[0];
-    el.textContent = `${next.line} → ${next.direction} · ${eta <= 0 ? 'sofort' : `${eta} min`}`;
+    el.textContent = `${next.line} → ${next.direction} · ${eta === 0 ? 'sofort' : `${eta} min`}`;
   } catch (err) { /* ignore, purely optional */ }
 }
 loadFavPreview();
