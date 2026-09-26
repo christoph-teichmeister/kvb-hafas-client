@@ -51,3 +51,41 @@ def test_minutes_until_ignores_device_timezone(page, tz):
     assert result["midnight"] == [15, 15]  # 23:50 -> 00:05 next day
     assert result["clock"]["hour"] == 15 and result["clock"]["minute"] == 55
     assert result["clock"]["weekday"] == 6  # Saturday
+
+
+BOARD_HARNESS = """
+const src = require('fs').readFileSync(process.argv[1], 'utf8');
+const start = src.indexOf('const BERLIN_PARTS');
+const end = src.indexOf('\\n}\\n', src.indexOf('function upcoming')) + 3;
+const f = new Function(src.slice(start, end)
+  + '; return { upcoming, platformLabel, groupByPlatform };')();
+const now = new Date('2026-09-26T13:55:00Z'); // 15:55 in Cologne
+const deps = [
+  { line: '5', planned: '154000', realtime: '154000' },  // gone
+  { line: '5', planned: '155000', realtime: '155500' },  // delayed, due now
+  { line: '5', planned: '160500', realtime: null },      // planned only
+  { line: '5', planned: '155400', realtime: '155400' },  // just gone
+  { line: '5', planned: '', realtime: null },            // unparseable
+];
+console.log(JSON.stringify({
+  upcoming: f.upcoming(deps, now).map(d => d.planned),
+  labels: ['Steig 1', '2', 'A', '', null].map(f.platformLabel),
+  order: f.groupByPlatform([{ platform: 'Steig 10' }, { platform: null },
+                            { platform: 'Steig 2' }]).map(([k]) => k),
+}));
+"""
+
+
+@pytest.mark.parametrize("tz", ["Europe/Berlin", "Europe/Athens"])
+def test_board_hides_past_departures_and_labels_platforms(tz):
+    out = subprocess.run(
+        [NODE, "-e", BOARD_HARNESS, str(WEBUI / "departures.html")],
+        env={**os.environ, "TZ": tz},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    result = json.loads(out.stdout)
+    assert result["upcoming"] == ["155000", "160500", ""]
+    assert result["labels"] == ["Steig 1", "Steig 2", "Steig A", "Ohne Steig-Angabe", "Ohne Steig-Angabe"]
+    assert result["order"] == ["Steig 2", "Steig 10", ""]

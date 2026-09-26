@@ -109,10 +109,11 @@ async function loadFavPreview() {
     }
     const results = await Promise.all(ids.map(async (id) => {
       try {
-        const dep = await fetch(`api/departures?stop_id=${encodeURIComponent(id)}&max=1`);
+        const dep = await fetch(`api/departures?stop_id=${encodeURIComponent(id)}&max=3`);
         if (!dep.ok) return null;
         const data = await dep.json();
-        return (data.departures || [])[0] || null;
+        // Skip departures already gone in Cologne time.
+        return (data.departures || []).find(d => !d.cancelled && (minutesUntil(d.realtime || d.planned) ?? -1) >= 0) || null;
       } catch { return null; }
     }));
     const candidates = results
@@ -125,7 +126,7 @@ async function loadFavPreview() {
     }
     candidates.sort((a, b) => a.eta - b.eta);
     const { d: next, eta } = candidates[0];
-    el.textContent = `${next.line} → ${next.direction} · ${eta <= 0 ? 'sofort' : `${eta} min`}`;
+    el.textContent = `${next.line} → ${next.direction} · ${eta === 0 ? 'sofort' : `${eta} min`}`;
   } catch (err) { /* ignore, purely optional */ }
 }
 loadFavPreview();

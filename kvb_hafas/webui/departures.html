@@ -135,9 +135,24 @@ function groupByPlatform(deps) {
   return [...groups.entries()].sort(([a], [b]) => {
     if (a === '') return 1;
     if (b === '') return -1;
-    const na = parseInt(a, 10), nb = parseInt(b, 10);
-    if (!isNaN(na) && !isNaN(nb)) return na - nb;
-    return a.localeCompare(b);
+    return a.localeCompare(b, 'de', { numeric: true }); // "Steig 2" < "Steig 10"
+  });
+}
+
+// Real dPlatf values are bare ("2", "A"); the mast fallback already reads
+// "Steig N" (see kvb_hafas.parsing._mast_steig) — don't prefix it twice.
+function platformLabel(platform) {
+  if (!platform) return 'Ohne Steig-Angabe';
+  return /^steig\b/i.test(platform) ? platform : `Steig ${platform}`;
+}
+
+// Departures that are already gone (in Cologne time) are dropped; the 15s
+// re-render lets them vanish between two 30s refetches. Unparseable times
+// stay visible rather than silently disappearing.
+function upcoming(deps, date = new Date()) {
+  return deps.filter(d => {
+    const eta = minutesUntil(d.realtime || d.planned, date);
+    return eta === null || eta >= 0;
   });
 }
 
@@ -165,24 +180,25 @@ function renderBoardHead(board) {
 
 function renderBoardRows(board) {
   const container = board.el.querySelector('.board-body');
-  if (!board.departures.length) {
+  const deps = upcoming(board.departures);
+  if (!deps.length) {
     container.innerHTML = '<div class="led-board"><div class="led-empty">keine Abfahrten</div></div>';
     return;
   }
-  container.innerHTML = groupByPlatform(board.departures).map(([platform, deps]) => {
-    const rows = deps.map(d => {
+  container.innerHTML = groupByPlatform(deps).map(([platform, group]) => {
+    const rows = group.map(d => {
       const eta = minutesUntil(d.realtime || d.planned);
       const delayed = !d.cancelled && typeof d.delay_minutes === 'number' && d.delay_minutes > 0;
       const etaText = d.cancelled ? 'Entfällt'
         : delayed ? `${fmtTime(d.realtime)}<span class="delay-tag">+${d.delay_minutes}</span>`
-        : eta === null ? '—' : eta <= 0 ? 'Sofort' : `${eta} Min`;
+        : eta === null ? '—' : eta === 0 ? 'Sofort' : `${eta} Min`;
       return `<div class="led-row${d.cancelled ? ' cancelled' : ''}">
         <span class="led-num">${d.line}</span>
         <span class="led-dest">${d.direction}</span>
         <span class="led-eta">${etaText}</span>
       </div>`;
     }).join('');
-    const label = platform ? `Steig ${platform}` : 'Ohne Steig-Angabe';
+    const label = platformLabel(platform);
     return `<div class="led-board">
       <div class="led-head"><span>${label}</span><span class="led-clock">${headClock()}</span></div>
       ${rows}
@@ -195,14 +211,15 @@ function announceBoardUpdate(board) {
   // re-render — a live region on a ticking countdown would otherwise
   // re-announce every tick.
   const announcer = document.getElementById('boardsAnnouncer');
-  if (!board.departures.length) {
+  const deps = upcoming(board.departures);
+  if (!deps.length) {
     announcer.textContent = `${board.name}: keine Abfahrten`;
     return;
   }
-  const next = board.departures[0];
+  const next = deps[0];
   const eta = minutesUntil(next.realtime || next.planned);
-  const etaText = next.cancelled ? 'entfällt' : eta === null ? '' : eta <= 0 ? 'sofort' : `in ${eta} Minuten`;
-  announcer.textContent = `${board.name}: ${board.departures.length} Abfahrten, nächste Linie ${next.line} ${etaText}`;
+  const etaText = next.cancelled ? 'entfällt' : eta === null ? '' : eta === 0 ? 'sofort' : `in ${eta} Minuten`;
+  announcer.textContent = `${board.name}: ${deps.length} Abfahrten, nächste Linie ${next.line} ${etaText}`;
 }
 
 async function refreshBoard(board) {
