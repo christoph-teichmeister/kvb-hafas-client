@@ -118,7 +118,23 @@ WEBUI = resources.files("kvb_hafas.webui")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 GEOMETRY_FILE = DATA_DIR / "map_geometry.json"
 RAIL_FILE = DATA_DIR / "rail_geometry.json"
-DB_FILE = DATA_DIR / "history.db"
+# Home Assistant Supervisor mounts the add-on's persistent (and backed-up)
+# storage at /data, next to options.json. DATA_DIR in kvb-ha-map is /app/data
+# inside the image, which is replaced on every add-on update — so the history
+# DB goes to /data whenever we're running as an add-on.
+ADDON_DATA_DIR = Path("/data")
+
+
+def _history_db_file(data_dir: Path, addon_data_dir: Path = ADDON_DATA_DIR) -> Path:
+    override = os.environ.get("HISTORY_DB_FILE")
+    if override:
+        return Path(override)
+    if (addon_data_dir / "options.json").is_file():
+        return addon_data_dir / "history.db"
+    return data_dir / "history.db"
+
+
+DB_FILE = _history_db_file(DATA_DIR)
 
 TRACK_SECONDS = 120
 PREFETCH_CHUNK = 10
@@ -676,7 +692,7 @@ def main() -> None:
     if HISTORY_ENABLED:
         threading.Thread(target=_history_sampler, daemon=True).start()
         threading.Thread(target=_history_purger, daemon=True).start()
-    print(f"KVB Live Map: http://{HOST}:{PORT}  (history {'on' if HISTORY_ENABLED else 'off'})")
+    print(f"KVB Live Map: http://{HOST}:{PORT}  (history {f'on, {DB_FILE}' if HISTORY_ENABLED else 'off'})")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

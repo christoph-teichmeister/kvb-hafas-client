@@ -9,10 +9,13 @@ cached — no extra KVB requests are made just for history).
 from __future__ import annotations
 
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
+
+_T = TypeVar("_T")
 
 # Mirrors kvb_hafas.webui.is_kvb_local.css_class's substring rules for "tram"
 # ("str"/"tram"/"stadtbahn" in the lowercased category) — kept as a SQL LIKE
@@ -40,22 +43,95 @@ CREATE INDEX IF NOT EXISTS idx_vehicle_observations_jid ON vehicle_observations(
 CREATE INDEX IF NOT EXISTS idx_vehicle_observations_line ON vehicle_observations(line, observed_at);
 """
 
+# SQLITE_CORRUPT ("database disk image is malformed") and SQLITE_NOTADB
+# ("file is not a database"). Primary result codes — extended codes carry them
+# in the low byte.
+_CORRUPTION_CODES = {11, 26}
+
+
+def _is_corruption(exc: sqlite3.DatabaseError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)  # Python >= 3.11
+    if code is not None:
+        return (code & 0xFF) in _CORRUPTION_CODES
+    msg = str(exc).lower()
+    return "malformed" in msg or "not a database" in msg
+
 
 class HistoryStore:
     """Thread-safe wrapper around a single SQLite connection.
 
     ponytail: one lock guarding one connection is plenty for a small local
     add-on writing at most once a minute; no need for a connection pool.
+
+    Self-healing: the history is a best-effort local statistic, so when SQLite
+    reports the file as corrupt (typically after a power loss on SD-card
+    storage) the file is moved aside as `<name>.corrupt` and a fresh, empty
+    database takes its place instead of failing every request until someone
+    deletes it by hand. No full `PRAGMA quick_check` at startup — on a
+    year's worth of samples that would scan gigabytes on every boot; corruption
+    is detected lazily by whichever query hits it first.
     """
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        try:
+            self._conn = self._open()
+        except sqlite3.DatabaseError as exc:
+            if not _is_corruption(exc):
+                raise
+            self._quarantine(exc)
+            self._conn = self._open()
+
+    def _open(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        try:
+            conn.row_factory = sqlite3.Row
+            # WAL + synchronous=NORMAL: a crash or power loss can at worst drop
+            # the last few commits instead of leaving a half-written page in the
+            # main file. Doesn't help against storage that ignores fsync.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript(SCHEMA)
+            conn.commit()
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def _quarantine(self, exc: sqlite3.DatabaseError) -> None:
+        """Move the corrupt DB (plus its -wal/-shm sidecars, which would
+        otherwise be replayed into the fresh file) to `<name>.corrupt*`.
+
+        Keeps only the most recent corrupt copy, so repeated corruption can't
+        fill the disk with multi-GB leftovers.
+        """
+        for suffix in ("", "-wal", "-shm"):
+            src = self._db_path.with_name(self._db_path.name + suffix)
+            dst = self._db_path.with_name(self._db_path.name + ".corrupt" + suffix)
+            dst.unlink(missing_ok=True)
+            if src.exists():
+                src.replace(dst)
+        print(
+            f"[history] {self._db_path} is corrupt ({exc}); moved it to "
+            f"{self._db_path.name}.corrupt and started a fresh history database",
+            file=sys.stderr,
+        )
+
+    def _run(self, fn: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Run `fn` against the connection under the lock. On corruption,
+        quarantine the file, reopen a fresh DB and retry once."""
         with self._lock:
-            self._conn.executescript(SCHEMA)
-            self._conn.commit()
+            try:
+                return fn(self._conn)
+            except sqlite3.DatabaseError as exc:
+                if not _is_corruption(exc):
+                    raise
+                self._conn.close()
+                self._quarantine(exc)
+                self._conn = self._open()
+                return fn(self._conn)
 
     def record_vehicles(self, vehicles: list[dict[str, Any]], observed_at: int | None = None) -> int:
         """Insert one row per vehicle dict (as produced by Vehicle -> asdict()).
@@ -80,31 +156,38 @@ class HistoryStore:
             )
             for v in vehicles
         ]
-        with self._lock:
-            self._conn.executemany(
+
+        def insert(conn: sqlite3.Connection) -> None:
+            conn.executemany(
                 """INSERT INTO vehicle_observations
                    (jid, line, category, direction, lat, lon, bearing, next_stop, delay_minutes, observed_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
-            self._conn.commit()
+            conn.commit()
+
+        self._run(insert)
         return len(rows)
 
     def purge_older_than(self, retention_days: int) -> int:
         """Delete observations older than `retention_days`. Returns rows removed."""
         cutoff = int(time.time()) - retention_days * 86400
-        with self._lock:
-            cur = self._conn.execute("DELETE FROM vehicle_observations WHERE observed_at < ?", (cutoff,))
-            self._conn.commit()
+
+        def delete(conn: sqlite3.Connection) -> int:
+            cur = conn.execute("DELETE FROM vehicle_observations WHERE observed_at < ?", (cutoff,))
+            conn.commit()
             return cur.rowcount or 0
 
+        return self._run(delete)
+
     def trip(self, jid: str) -> list[dict[str, Any]]:
-        with self._lock:
-            cur = self._conn.execute(
+        rows = self._run(
+            lambda conn: conn.execute(
                 "SELECT * FROM vehicle_observations WHERE jid = ? ORDER BY observed_at ASC",
                 (jid,),
-            )
-            return [dict(row) for row in cur.fetchall()]
+            ).fetchall()
+        )
+        return [dict(row) for row in rows]
 
     def vehicles(
         self,
@@ -126,9 +209,8 @@ class HistoryStore:
             params.append(ts_to)
         query += " ORDER BY observed_at ASC LIMIT ?"
         params.append(limit)
-        with self._lock:
-            cur = self._conn.execute(query, params)
-            return [dict(row) for row in cur.fetchall()]
+        rows = self._run(lambda conn: conn.execute(query, params).fetchall())
+        return [dict(row) for row in rows]
 
     def delay_stats(
         self,
@@ -147,11 +229,11 @@ class HistoryStore:
             where += " AND observed_at <= ?"
             params.append(ts_to)
 
-        with self._lock:
-            max_row = self._conn.execute(
+        def query(conn: sqlite3.Connection) -> tuple[Any, list[Any]]:
+            max_row = conn.execute(
                 f"SELECT MAX(delay_minutes) AS max_delay FROM vehicle_observations {where}", params
             ).fetchone()
-            per_line = self._conn.execute(
+            per_line = conn.execute(
                 f"""
                 SELECT
                     line,
@@ -165,6 +247,9 @@ class HistoryStore:
                 """,
                 params,
             ).fetchall()
+            return max_row, per_line
+
+        max_row, per_line = self._run(query)
 
         lines = []
         for row in per_line:
@@ -204,13 +289,14 @@ class HistoryStore:
         if ts_to is not None:
             where += " AND observed_at <= ?"
             params.append(ts_to)
-        with self._lock:
-            row = self._conn.execute(
+        row = self._run(
+            lambda conn: conn.execute(
                 f"""SELECT jid, line, direction, delay_minutes, observed_at
                     FROM vehicle_observations {where}
                     ORDER BY delay_minutes DESC, observed_at DESC LIMIT 1""",
                 params,
             ).fetchone()
+        )
         return dict(row) if row else None
 
     def punctuality_trend(self, window_seconds: int, bucket_seconds: int) -> dict[str, Any]:
@@ -230,8 +316,8 @@ class HistoryStore:
         chosen granularity.
         """
         since = int(time.time()) - window_seconds
-        with self._lock:
-            rows = self._conn.execute(
+        rows = self._run(
+            lambda conn: conn.execute(
                 f"""
                 SELECT
                     line,
@@ -245,6 +331,7 @@ class HistoryStore:
                 """,
                 [bucket_seconds, bucket_seconds, since],
             ).fetchall()
+        )
 
         now_bucket = (int(time.time()) // bucket_seconds) * bucket_seconds
         n_buckets = window_seconds // bucket_seconds

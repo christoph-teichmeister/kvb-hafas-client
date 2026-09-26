@@ -76,3 +76,31 @@ def test_live_stats_empty_vehicles_has_no_max_delay():
     assert stats["busiest_line"] is None
     assert stats["max_current_delay_minutes"] is None
     assert stats["max_current_delay_vehicle"] is None
+
+
+def test_history_db_file_defaults_to_data_dir(tmp_path, monkeypatch):
+    from kvb_hafas.server.http_server import _history_db_file
+
+    monkeypatch.delenv("HISTORY_DB_FILE", raising=False)
+    addon = tmp_path / "addon"  # kein options.json -> kein Add-on-Kontext
+    assert _history_db_file(tmp_path / "app", addon) == tmp_path / "app" / "history.db"
+
+
+def test_history_db_file_uses_addon_data_dir(tmp_path, monkeypatch):
+    from kvb_hafas.server.http_server import _history_db_file
+
+    monkeypatch.delenv("HISTORY_DB_FILE", raising=False)
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    (addon / "options.json").write_text("{}")
+    assert _history_db_file(tmp_path / "app", addon) == addon / "history.db"
+
+
+def test_history_db_file_env_override_wins(tmp_path, monkeypatch):
+    from kvb_hafas.server.http_server import _history_db_file
+
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    (addon / "options.json").write_text("{}")
+    monkeypatch.setenv("HISTORY_DB_FILE", str(tmp_path / "x.db"))
+    assert _history_db_file(tmp_path / "app", addon) == tmp_path / "x.db"
