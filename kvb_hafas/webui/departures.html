@@ -82,27 +82,47 @@ function fmtTime(hafas) {
   return `${t.slice(0, 2)}:${t.slice(2, 4)}`;
 }
 
-function minutesUntil(hafas) {
+// HAFAS times are Cologne wall-clock (HHMMSS; a day-offset prefix refers to
+// the journey's operating day, so it is ignored). Compare against
+// Europe/Berlin, not the device's timezone — otherwise a phone abroad
+// (e.g. Greece, +1h) sees every departure within the next hour as already
+// gone ("Sofort").
+const BERLIN_PARTS = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Europe/Berlin', hourCycle: 'h23',
+  year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function berlinNow(date = new Date()) {
+  const p = {};
+  for (const { type, value } of BERLIN_PARTS.formatToParts(date)) p[type] = value;
+  return {
+    year: +p.year, month: +p.month, day: +p.day, weekday: WEEKDAY_INDEX[p.weekday],
+    hour: +p.hour, minute: +p.minute, second: +p.second,
+  };
+}
+
+function minutesUntil(hafas, date = new Date()) {
   if (!hafas || hafas.length < 4) return null;
-  const now = new Date();
+  const now = berlinNow(date);
   const h = parseInt(hafas.slice(-6, -4), 10), m = parseInt(hafas.slice(-4, -2), 10);
-  const target = new Date(now);
-  target.setHours(h, m, 0, 0);
-  let diff = Math.round((target - now) / 60000);
+  const nowMin = now.hour * 60 + now.minute + now.second / 60;
+  let diff = Math.round(h * 60 + m - nowMin);
   if (diff < -60) diff += 1440;
   return diff;
 }
 
 function headClock() {
-  const now = new Date();
-  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const now = berlinNow();
+  return `${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')}`;
 }
 
 function headDate() {
-  const now = new Date();
-  const dd = String(now.getDate()).padStart(2, '0');
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  return `${WEEKDAYS[now.getDay()]} ${dd}.${mm}.${now.getFullYear()}`;
+  const now = berlinNow();
+  const dd = String(now.day).padStart(2, '0');
+  const mm = String(now.month).padStart(2, '0');
+  return `${WEEKDAYS[now.weekday]} ${dd}.${mm}.${now.year}`;
 }
 
 function groupByPlatform(deps) {
