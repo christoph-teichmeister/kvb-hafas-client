@@ -206,6 +206,27 @@ p.subtitle { color: var(--text-secondary); margin: 0 0 8px; font-size: 13px; }
 }
 .chart-legend li { display: flex; align-items: center; gap: 5px; }
 .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.chart-legend button {
+  display: flex; align-items: center; gap: 5px; border: none; background: transparent;
+  padding: 3px 4px; margin: -3px -4px; font: inherit; color: inherit; cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.chart-legend button:hover { color: var(--text-primary); }
+.chart-legend button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.chart-legend button[aria-pressed="false"] { color: var(--text-tertiary); text-decoration: line-through; }
+.chart-legend button[aria-pressed="false"] .swatch { background: transparent !important; box-shadow: inset 0 0 0 1.5px var(--text-tertiary); }
+.line-filter-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; font-size: 12px;
+}
+.line-filter-actions button {
+  border: 1px solid var(--border); background: transparent; color: var(--text-secondary);
+  padding: 3px 10px; font: inherit; font-weight: 600; border-radius: var(--radius-sm); cursor: pointer;
+}
+.line-filter-actions button:hover { background: var(--surface-sunken); color: var(--text-primary); }
+.line-filter-actions .hint { color: var(--text-tertiary); }
+#punctualityChart .series { transition: opacity .12s; }
+#punctualityChart svg.has-focus .series:not(.focused) { opacity: .15; }
+#punctualityChart svg.has-focus .series.focused polyline { stroke-width: 3; }
 
 /* Home directory menu — a wayfinding index, not a grid of icon+heading+text
    cards: one flat list, hairline dividers, asymmetric row weight (the
