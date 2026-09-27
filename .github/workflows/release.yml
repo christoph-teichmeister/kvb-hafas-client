@@ -88,18 +88,24 @@ jobs:
           { head -n "${header_lines}" CHANGELOG.md; echo; cat /tmp/changelog-entry.md; tail -n +$((header_lines + 1)) CHANGELOG.md; } > /tmp/CHANGELOG.md.new
           mv /tmp/CHANGELOG.md.new CHANGELOG.md
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Bump pyproject.toml version
         run: |
           set -euo pipefail
           sed -i -E "s/^version = \".*\"\$/version = \"${{ steps.version.outputs.new_version }}\"/" pyproject.toml
           grep -m1 '^version = ' pyproject.toml
+          # uv.lock records the project's own version too; without this every
+          # local `uv run` rewrites it and leaves the checkout dirty.
+          uv lock
 
       - name: Commit release changes
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md pyproject.toml
+          git add CHANGELOG.md pyproject.toml uv.lock
           git commit -m "chore(release): ${{ steps.version.outputs.new_version }} [skip release]"
           git push origin HEAD:main
 
