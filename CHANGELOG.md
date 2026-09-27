@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.9.9] - 2026-09-27
+
+### Other
+- ci(release): keep uv.lock version in sync with pyproject.toml (#15)
+
+
 ## [2026.9.8] - 2026-09-27
 
 ### Features
