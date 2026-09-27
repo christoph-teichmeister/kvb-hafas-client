@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import threading
 import time
+from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -24,6 +25,24 @@ _T = TypeVar("_T")
 _TRAM_CATEGORY_SQL = (
     "(LOWER(category) LIKE '%str%' OR LOWER(category) LIKE '%tram%' OR LOWER(category) LIKE '%stadtbahn%')"
 )
+
+# Hour-of-day stats are about when a Cologne commuter rides, so they're bucketed
+# in Europe/Berlin local time. Falls back to the container's local time if the
+# tz database isn't installed (e.g. a slim image without tzdata).
+try:
+    from zoneinfo import ZoneInfo
+
+    _LOCAL_TZ: tzinfo | None = ZoneInfo("Europe/Berlin")
+except Exception:  # ImportError or ZoneInfoNotFoundError
+    _LOCAL_TZ = None
+
+# Day-type filters for punctuality_by_hour, as sets of datetime.weekday() values.
+DAY_TYPES = {
+    "all": frozenset(range(7)),
+    "weekday": frozenset(range(5)),
+    "sat": frozenset({5}),
+    "sun": frozenset({6}),
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS vehicle_observations (
@@ -47,6 +66,11 @@ CREATE INDEX IF NOT EXISTS idx_vehicle_observations_line ON vehicle_observations
 # ("file is not a database"). Primary result codes — extended codes carry them
 # in the low byte.
 _CORRUPTION_CODES = {11, 26}
+
+
+def _rate(n: int, delayed_n: int) -> float | None:
+    """Share of on-time observations, rounded; None when there were none."""
+    return round(1 - delayed_n / n, 4) if n else None
 
 
 def _is_corruption(exc: sqlite3.DatabaseError) -> bool:
@@ -217,9 +241,13 @@ class HistoryStore:
         ts_from: int | None = None,
         ts_to: int | None = None,
         top_n: int = 10,
+        late_from: int = 3,
     ) -> dict[str, Any]:
         """Historical delay aggregations: max delay, per-line averages/punctuality,
-        top-N least-punctual lines. Tram-only (KVB Straßenbahn/Stadtbahn)."""
+        top-N least-punctual lines. Tram-only (KVB Straßenbahn/Stadtbahn).
+
+        An observation counts as late when delay_minutes >= `late_from` — the
+        same threshold the live stats use, so both dashboard sections agree."""
         where = f"WHERE delay_minutes IS NOT NULL AND {_TRAM_CATEGORY_SQL}"
         params: list[Any] = []
         if ts_from is not None:
@@ -239,13 +267,13 @@ class HistoryStore:
                     line,
                     COUNT(*) AS n,
                     AVG(delay_minutes) AS avg_delay,
-                    SUM(CASE WHEN delay_minutes > 0 THEN 1 ELSE 0 END) AS delayed_n
+                    SUM(CASE WHEN delay_minutes >= ? THEN 1 ELSE 0 END) AS delayed_n
                 FROM vehicle_observations
                 {where}
                 GROUP BY line
                 ORDER BY avg_delay DESC
                 """,
-                params,
+                [late_from, *params],
             ).fetchall()
             return max_row, per_line
 
@@ -274,6 +302,7 @@ class HistoryStore:
             "max_delay_minutes": max_row["max_delay"] if max_row else None,
             "lines": lines,
             "least_punctual_lines": least_punctual,
+            "late_from_minutes": late_from,
         }
 
     def max_delay_detail(self, ts_from: int | None = None, ts_to: int | None = None) -> dict[str, Any] | None:
@@ -299,7 +328,7 @@ class HistoryStore:
         )
         return dict(row) if row else None
 
-    def punctuality_trend(self, window_seconds: int, bucket_seconds: int) -> dict[str, Any]:
+    def punctuality_trend(self, window_seconds: int, bucket_seconds: int, late_from: int = 3) -> dict[str, Any]:
         """Tram-only punctuality rate per line, bucketed at `bucket_seconds`
         granularity over the last `window_seconds`.
 
@@ -310,9 +339,13 @@ class HistoryStore:
         aware timezone conversion, and a personal dashboard doesn't need it —
         the up-to-~2h boundary shift is cosmetic, not decision-relevant.
 
-        Returns {"buckets": [unix_ts, ...], "lines": {"1": [rate_or_null, ...], ...}}
-        with each per-line list aligned to "buckets" (oldest first). The
-        client formats bucket timestamps into labels appropriate to the
+        An observation is late when delay_minutes >= `late_from`.
+
+        Returns {"buckets": [unix_ts, ...], "lines": {"1": [rate_or_null, ...], ...},
+        "counts": {"1": [n, ...], ...}, "late_from_minutes": late_from} with each
+        per-line list aligned to "buckets" (oldest first). "counts" is the number
+        of observations behind each rate, so the client can flag thin buckets.
+        The client formats bucket timestamps into labels appropriate to the
         chosen granularity.
         """
         since = int(time.time()) - window_seconds
@@ -323,13 +356,13 @@ class HistoryStore:
                     line,
                     (observed_at / ?) * ? AS bucket,
                     COUNT(*) AS n,
-                    SUM(CASE WHEN delay_minutes > 0 THEN 1 ELSE 0 END) AS delayed_n
+                    SUM(CASE WHEN delay_minutes >= ? THEN 1 ELSE 0 END) AS delayed_n
                 FROM vehicle_observations
                 WHERE delay_minutes IS NOT NULL AND observed_at >= ? AND {_TRAM_CATEGORY_SQL}
                 GROUP BY line, bucket
                 ORDER BY line, bucket
                 """,
-                [bucket_seconds, bucket_seconds, since],
+                [bucket_seconds, bucket_seconds, late_from, since],
             ).fetchall()
         )
 
@@ -337,15 +370,71 @@ class HistoryStore:
         n_buckets = window_seconds // bucket_seconds
         buckets = [now_bucket - i * bucket_seconds for i in range(n_buckets - 1, -1, -1)]
 
-        by_line: dict[str, dict[int, float]] = {}
+        by_line: dict[str, dict[int, tuple[int, int]]] = {}
         for row in rows:
-            n = row["n"] or 0
-            delayed_n = row["delayed_n"] or 0
-            rate = (1 - delayed_n / n) if n else None
-            by_line.setdefault(row["line"], {})[row["bucket"]] = round(rate, 4) if rate is not None else None
+            by_line.setdefault(row["line"], {})[row["bucket"]] = (row["n"] or 0, row["delayed_n"] or 0)
 
-        lines_out = {line: [rates.get(b) for b in buckets] for line, rates in by_line.items()}
-        return {"buckets": buckets, "lines": lines_out}
+        lines_out: dict[str, list[float | None]] = {}
+        counts_out: dict[str, list[int]] = {}
+        for line, per_bucket in by_line.items():
+            cells = [per_bucket.get(b, (0, 0)) for b in buckets]
+            lines_out[line] = [_rate(n, d) for n, d in cells]
+            counts_out[line] = [n for n, _ in cells]
+        return {"buckets": buckets, "lines": lines_out, "counts": counts_out, "late_from_minutes": late_from}
+
+    def punctuality_by_hour(
+        self,
+        window_seconds: int,
+        late_from: int = 3,
+        days: str = "all",
+        tz: tzinfo | None = _LOCAL_TZ,
+    ) -> dict[str, Any]:
+        """Tram-only punctuality per line and local hour of day (0-23) over the
+        last `window_seconds`, optionally restricted to a day type
+        ("all", "weekday" = Mon-Fri, "sat", "sun"; see DAY_TYPES).
+
+        SQL aggregates per UTC hour slice; Python then maps each slice to its
+        local weekday/hour. Europe/Berlin offsets are whole hours, so every UTC
+        hour slice falls into exactly one local hour — the mapping is exact,
+        including across DST switches. Public holidays are not special-cased.
+
+        Returns {"hours": [0..23], "days": days, "late_from_minutes": late_from,
+        "lines": {"1": [rate_or_null x24], ...}, "counts": {"1": [n x24], ...}}.
+        """
+        weekdays = DAY_TYPES.get(days, DAY_TYPES["all"])
+        since = int(time.time()) - window_seconds
+        rows = self._run(
+            lambda conn: conn.execute(
+                f"""
+                SELECT
+                    line,
+                    (observed_at / 3600) * 3600 AS bucket,
+                    COUNT(*) AS n,
+                    SUM(CASE WHEN delay_minutes >= ? THEN 1 ELSE 0 END) AS delayed_n
+                FROM vehicle_observations
+                WHERE delay_minutes IS NOT NULL AND observed_at >= ? AND {_TRAM_CATEGORY_SQL}
+                GROUP BY line, bucket
+                """,
+                [late_from, since],
+            ).fetchall()
+        )
+
+        totals: dict[str, list[list[int]]] = {}
+        for row in rows:
+            local = datetime.fromtimestamp(row["bucket"], tz)
+            if local.weekday() not in weekdays:
+                continue
+            cell = totals.setdefault(row["line"], [[0, 0] for _ in range(24)])[local.hour]
+            cell[0] += row["n"] or 0
+            cell[1] += row["delayed_n"] or 0
+
+        return {
+            "hours": list(range(24)),
+            "days": days if days in DAY_TYPES else "all",
+            "late_from_minutes": late_from,
+            "lines": {line: [_rate(n, d) for n, d in cells] for line, cells in totals.items()},
+            "counts": {line: [n for n, _ in cells] for line, cells in totals.items()},
+        }
 
     def close(self) -> None:
         with self._lock:

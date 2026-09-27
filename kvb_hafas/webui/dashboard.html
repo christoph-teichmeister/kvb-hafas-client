@@ -33,12 +33,37 @@
   <div class="stat-grid" id="delayTiles" role="region" aria-live="polite"></div>
 
   <h2>Pünktlichkeit je Linie</h2>
-  <div class="window-toggle" role="group" aria-label="Zeitraum">
-    <button type="button" data-window="7d" class="active">7 Tage</button>
-    <button type="button" data-window="24h">24h</button>
-    <button type="button" data-window="1h">1h</button>
+  <div class="window-toggle" role="group" aria-label="Zeitraum" id="punctualityWindow">
+    <button type="button" data-value="7d" class="active">7 Tage</button>
+    <button type="button" data-value="24h">24h</button>
+    <button type="button" data-value="1h">1h</button>
   </div>
   <div id="punctualityChart"></div>
+  <div class="line-filter" id="lineFilter" hidden>
+    <ul class="chart-legend" id="chartLegend" role="group" aria-label="Linien ein-/ausblenden"></ul>
+    <div class="line-filter-actions">
+      <button type="button" data-lines="all">Alle</button>
+      <button type="button" data-lines="none">Keine</button>
+      <span class="hint">Klick blendet Linie ein/aus, Doppelklick zeigt nur diese Linie · Klick auf die Kurve öffnet die Linie auf der Karte</span>
+    </div>
+  </div>
+  <p class="chart-caption" id="punctualityCaption"></p>
+
+  <h2>Pünktlichkeit nach Tageszeit</h2>
+  <div class="toggle-row">
+    <div class="window-toggle" role="group" aria-label="Zeitraum" id="heatmapWindow">
+      <button type="button" data-value="28d" class="active">28 Tage</button>
+      <button type="button" data-value="7d">7 Tage</button>
+    </div>
+    <div class="window-toggle" role="group" aria-label="Wochentage" id="heatmapDays">
+      <button type="button" data-value="all" class="active">Alle Tage</button>
+      <button type="button" data-value="weekday">Mo–Fr</button>
+      <button type="button" data-value="sat">Sa</button>
+      <button type="button" data-value="sun">So</button>
+    </div>
+  </div>
+  <div id="hourHeatmap"></div>
+  <p class="chart-caption" id="heatmapCaption"></p>
   <div class="note" id="historyNote"></div>
 </main>
 <script>
@@ -125,6 +150,7 @@ async function refreshDelays() {
       note.textContent = 'Verlauf ist deaktiviert (history_enabled=false) — keine historischen Statistiken verfügbar.';
       box.innerHTML = '';
       document.getElementById('punctualityChart').innerHTML = '';
+      document.getElementById('lineFilter').hidden = true;
       return;
     }
     note.textContent = '';
@@ -133,6 +159,10 @@ async function refreshDelays() {
     box.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="delays">Erneut versuchen</button></div>`;
   }
 }
+
+// Buckets backed by fewer observations (vehicle samples, one per vehicle per
+// sampler tick) than this are drawn faded: a rate from 3 samples is noise.
+const MIN_SAMPLES = 20;
 
 let punctualityWindow = '7d';
 const WINDOW_LABELS = { '7d': 'über 7 Tage', '24h': 'über 24 Stunden', '1h': 'über die letzte Stunde' };
@@ -145,16 +175,65 @@ function fmtBucketLabel(ts, window) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+// Lines the user deselected in the legend; persisted per browser so the
+// selection survives the periodic refresh and page reloads.
+const HIDDEN_LINES_KEY = 'kvb-dashboard-hidden-lines';
+let hiddenLines = linesFromUrl() || loadHiddenLines();
+let lastPunctuality = null;
+
+function loadHiddenLines() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(HIDDEN_LINES_KEY) || '[]');
+    return new Set(Array.isArray(stored) ? stored.filter(l => TRAM_LINES.includes(l)) : []);
+  } catch (err) { return new Set(); }
+}
+
+function saveHiddenLines() {
+  try { localStorage.setItem(HIDDEN_LINES_KEY, JSON.stringify([...hiddenLines])); } catch (err) { /* private mode */ }
+}
+
+// ?lines=13,18 shows only those lines — bookmarkable, linkable from HA.
+// Unknown line numbers are ignored; a param with none left is ignored too.
+function linesFromUrl() {
+  const raw = new URLSearchParams(location.search).get('lines');
+  if (raw === null) return null;
+  const shown = raw.split(',').map(l => l.trim()).filter(l => TRAM_LINES.includes(l));
+  if (!shown.length) return null;
+  return new Set(TRAM_LINES.filter(l => !shown.includes(l)));
+}
+
+function syncLinesToUrl() {
+  const params = new URLSearchParams(location.search);
+  if (hiddenLines.size) params.set('lines', TRAM_LINES.filter(l => !hiddenLines.has(l)).join(','));
+  else params.delete('lines');
+  const qs = params.toString().replace(/%2C/g, ',');
+  history.replaceState(null, '', qs ? `?${qs}` : location.pathname);
+}
+
+function mapHref(line) {
+  return `map.html?line=${encodeURIComponent(line)}`;
+}
+
+function pct(v) {
+  return `${(v * 100).toFixed(0)} %`;
+}
+
 function renderPunctualityChart(data) {
+  lastPunctuality = data;
   const container = document.getElementById('punctualityChart');
+  const filter = document.getElementById('lineFilter');
   const buckets = data.buckets || [];
   const linesData = data.lines || {};
   const activeLines = TRAM_LINES.filter(l => linesData[l] && linesData[l].some(v => v !== null && v !== undefined));
 
   if (!buckets.length || !activeLines.length) {
     container.innerHTML = '<div class="empty">noch nicht genug Verlaufsdaten</div>';
+    filter.hidden = true;
+    document.getElementById('punctualityCaption').textContent = '';
     return;
   }
+
+  const shownLines = activeLines.filter(l => !hiddenLines.has(l));
 
   const W = 640, H = 220, padL = 34, padR = 10, padT = 10, padB = 22;
   const plotW = W - padL - padR, plotH = H - padT - padB;
@@ -170,12 +249,15 @@ function renderPunctualityChart(data) {
   });
   buckets.forEach((b, i) => {
     if (i % labelEvery !== 0 && i !== buckets.length - 1) return;
-    svg += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle" font-size="9" style="fill:var(--text-tertiary)">${fmtBucketLabel(b, punctualityWindow)}</text>`;
+    const anchor = i === buckets.length - 1 && buckets.length > 1 ? 'end' : i === 0 && buckets.length > 1 ? 'start' : 'middle';
+    svg += `<text x="${x(i)}" y="${H - 6}" text-anchor="${anchor}" font-size="9" style="fill:var(--text-tertiary)">${fmtBucketLabel(b, punctualityWindow)}</text>`;
   });
 
-  for (const line of activeLines) {
+  const countsData = data.counts || {};
+  for (const line of shownLines) {
     const color = lineColor(line);
     const values = linesData[line];
+    const counts = countsData[line] || [];
     const runs = [];
     let current = [];
     values.forEach((v, i) => {
@@ -188,21 +270,200 @@ function renderPunctualityChart(data) {
     });
     if (current.length) runs.push(current);
 
+    svg += `<a href="${mapHref(line)}" class="series" data-line="${line}"><title>Linie ${line} auf der Karte zeigen</title>`;
     for (const run of runs) {
       const pts = run.map(([i, v]) => `${x(i)},${y(v)}`).join(' ');
       svg += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
       for (const [i, v] of run) {
-        svg += `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="${color}"><title>Linie ${line}: ${(v * 100).toFixed(0)}% um ${fmtBucketLabel(buckets[i], punctualityWindow)}</title></circle>`;
+        const n = counts[i];
+        const thin = n !== undefined && n < MIN_SAMPLES;
+        const nLabel = n === undefined ? '' : ` · ${n} Beobachtungen${thin ? ' (wenig Daten)' : ''}`;
+        const style = thin ? `style="fill:var(--surface)" stroke="${color}" stroke-width="1.5" class="thin"` : `fill="${color}"`;
+        svg += `<circle cx="${x(i)}" cy="${y(v)}" r="3.5" ${style}><title>Linie ${line}: ${pct(v)} pünktlich um ${fmtBucketLabel(buckets[i], punctualityWindow)}${nLabel}</title></circle>`;
       }
     }
+    svg += '</a>';
+  }
+  if (!shownLines.length) {
+    svg += `<text x="${padL + plotW / 2}" y="${padT + plotH / 2}" text-anchor="middle" font-size="11" style="fill:var(--text-tertiary)">keine Linie ausgewählt</text>`;
   }
   svg += '</svg>';
 
-  const legend = `<ul class="chart-legend">${activeLines.map(l =>
-    `<li><span class="swatch" style="background:${lineColor(l)}"></span>Linie ${l}</li>`
-  ).join('')}</ul>`;
+  container.innerHTML = svg;
+  renderLegend(activeLines);
+  filter.hidden = false;
+  document.getElementById('punctualityCaption').textContent = lateCaption(data.late_from_minutes) +
+    ` Hohle Punkte: weniger als ${MIN_SAMPLES} Beobachtungen.`;
+}
 
-  container.innerHTML = svg + legend;
+function lateCaption(lateFrom) {
+  return lateFrom ? `Pünktlich = weniger als ${lateFrom} Min. Verspätung.` : '';
+}
+
+// Rebuilds the legend only when the set of lines changes; otherwise just
+// flips aria-pressed, so the buttons stay the same DOM nodes (needed for
+// dblclick detection, and keeps keyboard focus across the periodic refresh).
+function renderLegend(activeLines) {
+  const legend = document.getElementById('chartLegend');
+  const key = activeLines.join(',');
+  if (legend.dataset.lines !== key) {
+    legend.dataset.lines = key;
+    legend.innerHTML = activeLines.map(l =>
+      `<li><button type="button" data-line="${l}"><span class="swatch" style="background:${lineColor(l)}"></span>Linie ${l}</button></li>`
+    ).join('');
+  }
+  legend.querySelectorAll('button[data-line]').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(!hiddenLines.has(btn.dataset.line)));
+  });
+}
+
+function highlightLine(line) {
+  const svg = document.querySelector('#punctualityChart svg');
+  if (!svg) return;
+  svg.classList.toggle('has-focus', !!line && !hiddenLines.has(line));
+  svg.querySelectorAll('.series').forEach(g => g.classList.toggle('focused', g.dataset.line === line));
+}
+
+function setHiddenLines(next) {
+  hiddenLines = next;
+  saveHiddenLines();
+  syncLinesToUrl();
+  if (lastPunctuality) renderPunctualityChart(lastPunctuality);
+  if (lastHeatmap) renderHeatmap(lastHeatmap);
+}
+
+function initLineFilter() {
+  const filter = document.getElementById('lineFilter');
+  const legend = document.getElementById('chartLegend');
+  legend.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-line]');
+    if (!btn) return;
+    const next = new Set(hiddenLines);
+    if (next.has(btn.dataset.line)) next.delete(btn.dataset.line); else next.add(btn.dataset.line);
+    setHiddenLines(next);
+  });
+  // A double click fires two clicks first (net: unchanged), then isolates the line.
+  legend.addEventListener('dblclick', (e) => {
+    const btn = e.target.closest('button[data-line]');
+    if (!btn) return;
+    setHiddenLines(new Set(TRAM_LINES.filter(l => l !== btn.dataset.line)));
+  });
+  legend.addEventListener('mouseover', (e) => {
+    const btn = e.target.closest('button[data-line]');
+    highlightLine(btn ? btn.dataset.line : null);
+  });
+  legend.addEventListener('mouseleave', () => highlightLine(null));
+  legend.addEventListener('focusin', (e) => {
+    const btn = e.target.closest('button[data-line]');
+    if (btn) highlightLine(btn.dataset.line);
+  });
+  legend.addEventListener('focusout', () => highlightLine(null));
+  filter.querySelector('[data-lines="all"]').addEventListener('click', () => setHiddenLines(new Set()));
+  filter.querySelector('[data-lines="none"]').addEventListener('click', () => setHiddenLines(new Set(TRAM_LINES)));
+}
+
+// Hour-of-day heatmap. The 28-day query is heavier than the others and the
+// picture barely moves minute to minute, so it refreshes on its own slower
+// clock (and immediately on toggle changes).
+const HEATMAP_REFRESH_SECONDS = 300;
+const DAY_LABELS = { all: 'alle Tage', weekday: 'Mo–Fr', sat: 'Samstag', sun: 'Sonntag' };
+let heatmapWindow = '28d';
+let heatmapDays = 'all';
+let lastHeatmap = null;
+
+function renderHeatmap(data) {
+  lastHeatmap = data;
+  const container = document.getElementById('hourHeatmap');
+  const caption = document.getElementById('heatmapCaption');
+  const linesData = data.lines || {};
+  const countsData = data.counts || {};
+  const withData = TRAM_LINES.filter(l => linesData[l] && linesData[l].some(v => v !== null && v !== undefined));
+  const rows = withData.filter(l => !hiddenLines.has(l));
+
+  if (!withData.length) {
+    container.innerHTML = '<div class="empty">noch nicht genug Verlaufsdaten</div>';
+    caption.textContent = '';
+    return;
+  }
+  if (!rows.length) {
+    container.innerHTML = '<div class="empty">keine Linie ausgewählt</div>';
+    caption.textContent = '';
+    return;
+  }
+
+  // Color encodes the late share (the "bad" direction gets the ink), scaled
+  // to the worst reliable cell so a network that's 90 % punctual still shows
+  // contrast. Thin cells don't set the scale — one late sample would flatten it.
+  let maxLate = 0.1;
+  for (const l of rows) {
+    linesData[l].forEach((v, h) => {
+      if (v !== null && (countsData[l]?.[h] ?? MIN_SAMPLES) >= MIN_SAMPLES) maxLate = Math.max(maxLate, 1 - v);
+    });
+  }
+
+  const cellW = 24, cellH = 20, gap = 2, padL = 58, padT = 16;
+  const W = padL + 24 * cellW, H = padT + rows.length * cellH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pünktlichkeit je Linie nach Tageszeit, ${DAY_LABELS[heatmapDays]}" preserveAspectRatio="xMidYMid meet">`;
+  svg += `<defs><pattern id="thinHatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="4" style="stroke:var(--text-tertiary)" stroke-width="1"/></pattern></defs>`;
+  for (let h = 0; h < 24; h += 3) {
+    svg += `<text x="${padL + h * cellW + cellW / 2}" y="${padT - 5}" text-anchor="middle" font-size="9" style="fill:var(--text-tertiary)">${String(h).padStart(2, '0')}</text>`;
+  }
+  rows.forEach((line, r) => {
+    const cy = padT + r * cellH;
+    svg += `<rect x="4" y="${cy + cellH / 2 - 4}" width="8" height="8" rx="2" fill="${lineColor(line)}"/>`;
+    svg += `<text x="16" y="${cy + cellH / 2 + 3}" font-size="10" style="fill:var(--text-secondary)">Linie ${line}</text>`;
+    svg += `<a href="${mapHref(line)}">`;
+    linesData[line].forEach((v, h) => {
+      const x = padL + h * cellW;
+      const n = countsData[line]?.[h] ?? 0;
+      const w = cellW - gap, hh = cellH - gap;
+      if (v === null || v === undefined) {
+        svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" class="heat-empty"><title>Linie ${line}, ${String(h).padStart(2, '0')}–${String(h + 1).padStart(2, '0')} Uhr: keine Daten</title></rect>`;
+        return;
+      }
+      const late = 1 - v;
+      const alpha = (0.06 + 0.94 * Math.min(1, late / maxLate)).toFixed(3);
+      const thin = n < MIN_SAMPLES;
+      const title = `Linie ${line}, ${String(h).padStart(2, '0')}–${String(h + 1).padStart(2, '0')} Uhr: ${pct(v)} pünktlich · ${n} Beobachtungen${thin ? ' (wenig Daten)' : ''}`;
+      svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" class="heat-cell" fill-opacity="${alpha}"><title>${title}</title></rect>`;
+      if (thin) svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" fill="url(#thinHatch)" pointer-events="none"/>`;
+    });
+    svg += '</a>';
+  });
+  svg += '</svg>';
+
+  const scale = `<div class="heat-scale" aria-hidden="true"><span>0 % verspätet</span><span class="heat-ramp"></span><span>≥ ${(maxLate * 100).toFixed(0)} % verspätet</span></div>`;
+  container.innerHTML = svg + scale;
+  caption.textContent = `${lateCaption(data.late_from_minutes)} Ortszeit, ${DAY_LABELS[heatmapDays]}, letzte ${heatmapWindow === '7d' ? '7' : '28'} Tage. ` +
+    `Schraffiert: weniger als ${MIN_SAMPLES} Beobachtungen. Linienauswahl wie oben.`;
+}
+
+async function refreshHeatmap() {
+  const container = document.getElementById('hourHeatmap');
+  try {
+    const res = await fetch(`api/stats/punctuality-by-hour?window=${heatmapWindow}&days=${heatmapDays}`);
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || res.statusText);
+    if (d.error === 'history disabled') {
+      container.innerHTML = '';
+      document.getElementById('heatmapCaption').textContent = '';
+      return;
+    }
+    renderHeatmap(d);
+  } catch (err) {
+    document.getElementById('heatmapCaption').textContent = '';
+    container.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="heatmap">Erneut versuchen</button></div>`;
+  }
+}
+
+function initToggleGroup(id, onChange) {
+  const group = document.getElementById(id);
+  group.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-value]');
+    if (!btn || btn.classList.contains('active')) return;
+    group.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+    onChange(btn.dataset.value);
+  });
 }
 
 async function refreshPunctuality() {
@@ -213,10 +474,12 @@ async function refreshPunctuality() {
     if (!res.ok) throw new Error(d.error || res.statusText);
     if (d.error === 'history disabled') {
       chart.innerHTML = ''; // historyNote is already set by refreshDelays()
+      document.getElementById('lineFilter').hidden = true;
       return;
     }
     renderPunctualityChart(d);
   } catch (err) {
+    document.getElementById('lineFilter').hidden = true;
     chart.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="punctuality">Erneut versuchen</button></div>`;
   }
 }
@@ -245,22 +508,22 @@ async function init() {
       refreshSeconds = cfg.dashboard_refresh_seconds || 15;
     }
   } catch (err) { /* defaults */ }
+  initLineFilter();
+  initToggleGroup('punctualityWindow', (v) => { punctualityWindow = v; refreshPunctuality(); });
+  initToggleGroup('heatmapWindow', (v) => { heatmapWindow = v; refreshHeatmap(); });
+  initToggleGroup('heatmapDays', (v) => { heatmapDays = v; refreshHeatmap(); });
+  if (hiddenLines.size) { saveHiddenLines(); syncLinesToUrl(); }
   refreshAll();
   setInterval(refreshAll, refreshSeconds * 1000);
+  refreshHeatmap();
+  setInterval(refreshHeatmap, HEATMAP_REFRESH_SECONDS * 1000);
   document.body.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-retry]');
     if (!btn) return;
     if (btn.dataset.retry === 'live') refreshLive();
     else if (btn.dataset.retry === 'delays') refreshDelays();
     else if (btn.dataset.retry === 'punctuality') refreshPunctuality();
-  });
-  document.querySelectorAll('.window-toggle button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (btn.dataset.window === punctualityWindow) return;
-      punctualityWindow = btn.dataset.window;
-      document.querySelectorAll('.window-toggle button').forEach(b => b.classList.toggle('active', b === btn));
-      refreshPunctuality();
-    });
+    else if (btn.dataset.retry === 'heatmap') refreshHeatmap();
   });
 }
 
