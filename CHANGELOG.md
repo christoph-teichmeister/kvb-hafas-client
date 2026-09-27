@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.9.8] - 2026-09-27
+
+### Features
+- line filter, hour-of-day heatmap and consistent punctuality (#14)
+
+
 ## [2026.9.7] - 2026-09-26
 
 ### Fixes
