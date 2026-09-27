@@ -152,6 +152,12 @@ PUNCTUALITY_WINDOWS = {
     "1h": (3600, 300),
 }
 
+# Hour-of-day heatmap windows (seconds). Bounded server-side like the above.
+PUNCTUALITY_HOUR_WINDOWS = {
+    "7d": 7 * 86400,
+    "28d": 28 * 86400,
+}
+
 # --------------------------------------------------------------------------
 # Shared state — same ponytail as the source prototype: one lock, dict caches.
 # Fine for a single-user local add-on; not meant to scale past a handful of
@@ -509,6 +515,8 @@ class Handler(BaseHTTPRequestHandler):
             self._stats_delays_route(parse_qs(url.query))
         elif path == "/api/stats/punctuality-trend":
             self._stats_punctuality_trend_route(parse_qs(url.query))
+        elif path == "/api/stats/punctuality-by-hour":
+            self._stats_punctuality_by_hour_route(parse_qs(url.query))
         elif path == "/api/history/trip":
             self._history_trip_route(parse_qs(url.query))
         elif path == "/api/history/vehicles":
@@ -615,7 +623,7 @@ class Handler(BaseHTTPRequestHandler):
         ts_to = self._int_or_none(query.get("to", [None])[0])
 
         def _combined() -> dict:
-            stats = _history.delay_stats(ts_from=ts_from, ts_to=ts_to)
+            stats = _history.delay_stats(ts_from=ts_from, ts_to=ts_to, late_from=LATE_FROM)
             stats["max_delay_detail"] = _history.max_delay_detail(ts_from=ts_from, ts_to=ts_to)
             return stats
 
@@ -627,7 +635,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         window = (query.get("window", ["7d"])[0]) or "7d"
         window_seconds, bucket_seconds = PUNCTUALITY_WINDOWS.get(window, PUNCTUALITY_WINDOWS["7d"])
-        self._guarded(lambda: _history.punctuality_trend(window_seconds, bucket_seconds))
+        self._guarded(lambda: _history.punctuality_trend(window_seconds, bucket_seconds, late_from=LATE_FROM))
+
+    def _stats_punctuality_by_hour_route(self, query: dict) -> None:
+        if not _history:
+            self._json(200, {"error": "history disabled", "hours": list(range(24)), "lines": {}, "counts": {}})
+            return
+        window = (query.get("window", ["28d"])[0]) or "28d"
+        window_seconds = PUNCTUALITY_HOUR_WINDOWS.get(window, PUNCTUALITY_HOUR_WINDOWS["28d"])
+        days = (query.get("days", ["all"])[0]) or "all"
+        self._guarded(lambda: _history.punctuality_by_hour(window_seconds, late_from=LATE_FROM, days=days))
 
     def _history_trip_route(self, query: dict) -> None:
         jid = (query.get("jid", [""])[0]).strip()

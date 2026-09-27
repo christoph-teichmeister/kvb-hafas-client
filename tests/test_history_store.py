@@ -86,6 +86,74 @@ def test_punctuality_trend_hourly_bucketing(store):
     assert trend["lines"]["1"][-2] == 1.0  # previous hour: on time
 
 
+def test_punctuality_trend_uses_late_from_threshold_and_reports_counts(store):
+    now = int(time.time())
+    hour_seconds = 3600
+    # 2 min late: on time at the default threshold of 3, late at threshold 1
+    store.record_vehicles([_obs("t1", "1", "Str", 2), _obs("t2", "1", "Str", 3)], observed_at=now)
+
+    trend = store.punctuality_trend(window_seconds=24 * hour_seconds, bucket_seconds=hour_seconds)
+    assert trend["late_from_minutes"] == 3
+    assert trend["lines"]["1"][-1] == 0.5
+    assert trend["counts"]["1"][-1] == 2
+    assert trend["counts"]["1"][0] == 0
+
+    strict = store.punctuality_trend(window_seconds=24 * hour_seconds, bucket_seconds=hour_seconds, late_from=1)
+    assert strict["lines"]["1"][-1] == 0.0
+
+
+def test_delay_stats_uses_late_from_threshold(store):
+    store.record_vehicles([_obs("t1", "1", "Str", 2), _obs("t2", "1", "Str", 5)], observed_at=int(time.time()))
+    assert store.delay_stats()["lines"][0]["punctuality_rate"] == 0.5
+    assert store.delay_stats(late_from=1)["lines"][0]["punctuality_rate"] == 0.0
+    assert store.delay_stats()["late_from_minutes"] == 3
+
+
+def _berlin():
+    zoneinfo = pytest.importorskip("zoneinfo")
+    try:
+        return zoneinfo.ZoneInfo("Europe/Berlin")
+    except zoneinfo.ZoneInfoNotFoundError:
+        pytest.skip("tz database not installed")
+
+
+def test_punctuality_by_hour_buckets_by_local_hour_and_day_type(store, monkeypatch):
+    from datetime import datetime
+
+    tz = _berlin()
+    # Freeze "now" to a known Sunday so the fixture timestamps stay in the window.
+    now = int(datetime(2026, 3, 29, 20, 0, tzinfo=tz).timestamp())
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    def ts(*args):
+        return int(datetime(*args, tzinfo=tz).timestamp())
+
+    store.record_vehicles([_obs("a", "1", "Str", 0)], observed_at=ts(2026, 3, 27, 8, 15))  # Fri 08h, on time
+    store.record_vehicles([_obs("b", "1", "Str", 6)], observed_at=ts(2026, 3, 27, 8, 45))  # Fri 08h, late
+    store.record_vehicles([_obs("c", "1", "Str", 0)], observed_at=ts(2026, 3, 28, 8, 30))  # Sat 08h
+    # Sun 29.03. is the CEST switch: 03:30 local is after it, still hour 3
+    store.record_vehicles([_obs("d", "1", "Str", 9)], observed_at=ts(2026, 3, 29, 3, 30))
+    store.record_vehicles([_obs("e", "146", "Bus", 20)], observed_at=ts(2026, 3, 27, 8, 30))  # excluded
+
+    week = 7 * 86400
+    all_days = store.punctuality_by_hour(week, tz=tz)
+    assert all_days["hours"] == list(range(24))
+    assert "146" not in all_days["lines"]
+    assert all_days["counts"]["1"][8] == 3
+    assert all_days["lines"]["1"][8] == round(2 / 3, 4)
+    assert all_days["lines"]["1"][3] == 0.0
+    assert all_days["lines"]["1"][0] is None
+
+    weekday = store.punctuality_by_hour(week, tz=tz, days="weekday")
+    assert weekday["counts"]["1"][8] == 2
+    assert weekday["lines"]["1"][8] == 0.5
+    assert weekday["lines"]["1"][3] is None
+
+    assert store.punctuality_by_hour(week, tz=tz, days="sat")["lines"]["1"][8] == 1.0
+    assert store.punctuality_by_hour(week, tz=tz, days="sun")["counts"]["1"][3] == 1
+    assert store.punctuality_by_hour(week, tz=tz, days="bogus")["days"] == "all"
+
+
 # ---------------------------------------------------------------------------
 # Korruptions-Selbstheilung und Journal-Modus
 # ---------------------------------------------------------------------------
