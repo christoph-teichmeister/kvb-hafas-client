@@ -62,7 +62,10 @@
       <button type="button" data-value="sun">So</button>
     </div>
   </div>
-  <div id="hourHeatmap"></div>
+  <div class="chart-wrap" id="hourHeatmapWrap">
+    <div id="hourHeatmap"></div>
+    <div class="chart-tooltip" id="heatTooltip" role="tooltip" hidden></div>
+  </div>
   <p class="chart-caption" id="heatmapCaption"></p>
   <div class="note" id="historyNote"></div>
 </main>
@@ -525,9 +528,11 @@ function renderHeatmap(data) {
   if (!withData.length) {
     container.innerHTML = '<div class="empty">noch nicht genug Verlaufsdaten</div>';
     caption.textContent = '';
+    hideHeatTooltip();
     return;
   }
   if (!rows.length) {
+    hideHeatTooltip();
     container.innerHTML = '<div class="empty">keine Linie ausgewählt</div>';
     caption.textContent = '';
     return;
@@ -554,20 +559,19 @@ function renderHeatmap(data) {
     const cy = padT + r * cellH;
     svg += `<rect x="4" y="${cy + cellH / 2 - 4}" width="8" height="8" rx="2" fill="${lineColor(line)}"/>`;
     svg += `<text x="16" y="${cy + cellH / 2 + 3}" font-size="10" style="fill:var(--text-secondary)">Linie ${line}</text>`;
-    svg += `<a href="${mapHref(line)}">`;
+    svg += `<a href="${mapHref(line)}" aria-label="Linie ${line} auf der Karte zeigen">`;
     linesData[line].forEach((v, h) => {
       const x = padL + h * cellW;
       const n = countsData[line]?.[h] ?? 0;
       const w = cellW - gap, hh = cellH - gap;
       if (v === null || v === undefined) {
-        svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" class="heat-empty"><title>Linie ${line}, ${String(h).padStart(2, '0')}–${String(h + 1).padStart(2, '0')} Uhr: keine Daten</title></rect>`;
+        svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" class="heat-empty" data-line="${line}" data-h="${h}"/>`;
         return;
       }
       const late = 1 - v;
       const alpha = (0.06 + 0.94 * Math.min(1, late / maxLate)).toFixed(3);
       const thin = n < MIN_SAMPLES;
-      const title = `Linie ${line}, ${String(h).padStart(2, '0')}–${String(h + 1).padStart(2, '0')} Uhr: ${pct(v)} pünktlich · ${n} Beobachtungen${thin ? ' (wenig Daten)' : ''}`;
-      svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" class="heat-cell" fill-opacity="${alpha}"><title>${title}</title></rect>`;
+      svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" class="heat-cell" fill-opacity="${alpha}" data-line="${line}" data-h="${h}"/>`;
       if (thin) svg += `<rect x="${x}" y="${cy}" width="${w}" height="${hh}" rx="3" fill="url(#thinHatch)" pointer-events="none"/>`;
     });
     svg += '</a>';
@@ -576,8 +580,105 @@ function renderHeatmap(data) {
 
   const scale = `<div class="heat-scale" aria-hidden="true"><span>0 % verspätet</span><span class="heat-ramp"></span><span>≥ ${(maxLate * 100).toFixed(0)} % verspätet</span></div>`;
   container.innerHTML = svg + scale;
+  if (heatHover) showHeatTooltip(heatHover.line, heatHover.h, heatHover.pinned);
+  else hideHeatTooltip();
   caption.textContent = `${lateCaption(data.late_from_minutes)} Ortszeit, ${DAY_LABELS[heatmapDays]}, letzte ${heatmapWindow === '7d' ? '7' : '28'} Tage. ` +
-    `Schraffiert: weniger als ${MIN_SAMPLES} Beobachtungen. Linienauswahl wie oben.`;
+    `Schraffiert: weniger als ${MIN_SAMPLES} Beobachtungen. Zelle antippen/überfahren zeigt Details. Linienauswahl wie oben.`;
+}
+
+// Hover/tap tooltip for the heatmap cells, same look and touch behavior as
+// the punctuality chart's. It lives outside #hourHeatmap because that element
+// scrolls horizontally and would clip it.
+let heatHover = null; // { line, h, pinned } — survives re-renders
+
+function hourRange(h) {
+  return `${String(h).padStart(2, '0')}–${String(h + 1).padStart(2, '0')} Uhr`;
+}
+
+function hideHeatTooltip() {
+  heatHover = null;
+  document.getElementById('heatTooltip').hidden = true;
+  document.querySelectorAll('#hourHeatmap rect.active').forEach(r => r.classList.remove('active'));
+}
+
+function showHeatTooltip(line, h, pinned) {
+  const wrap = document.getElementById('hourHeatmapWrap');
+  const tip = document.getElementById('heatTooltip');
+  const cell = wrap.querySelector(`#hourHeatmap rect[data-line="${line}"][data-h="${h}"]`);
+  if (!cell || !lastHeatmap) { hideHeatTooltip(); return; }
+  heatHover = { line, h, pinned };
+  wrap.querySelectorAll('#hourHeatmap rect.active').forEach(r => r.classList.remove('active'));
+  cell.classList.add('active');
+
+  const values = lastHeatmap.lines[line] || [];
+  const counts = (lastHeatmap.counts || {})[line] || [];
+  const v = values[h];
+  const n = counts[h] ?? 0;
+  // Whole-day rate for the same line, weighted by observations, as a baseline
+  // for "is this hour unusually bad for this line".
+  let sum = 0, total = 0;
+  values.forEach((r, i) => { if (r !== null && r !== undefined) { sum += r * (counts[i] ?? 0); total += counts[i] ?? 0; } });
+  const dayAvg = total ? sum / total : null;
+
+  const name = pinned ? `<a href="${mapHref(line)}">Linie ${line}</a>` : `Linie ${line}`;
+  let body;
+  if (v === null || v === undefined) {
+    body = '<tr><td>keine Daten</td></tr>';
+  } else {
+    const thin = n < MIN_SAMPLES;
+    body = `<tr class="nearest"><td>pünktlich</td><td class="num">${pct(v)}</td></tr>` +
+      `<tr><td>verspätet</td><td class="num">${pct(1 - v)}</td></tr>` +
+      (dayAvg !== null ? `<tr><td>Ø ganzer Tag</td><td class="num">${pct(dayAvg)}</td></tr>` : '') +
+      `<tr${thin ? ' class="thin-warn"' : ''}><td class="n">Beobachtungen</td><td class="num n">${n}${thin ? ' ⚠ wenig Daten' : ''}</td></tr>`;
+  }
+  const hint = pinned ? '<div class="tip-hint">Linie antippen → Karte</div>' : '';
+  tip.innerHTML = `<div class="tip-head"><span class="swatch" style="background:${lineColor(line)}"></span>${name} · ${hourRange(h)}</div>` +
+    `<table>${body}</table>${hint}`;
+  tip.classList.toggle('pinned', !!pinned);
+  tip.hidden = false;
+
+  const wr = wrap.getBoundingClientRect();
+  const cr = cell.getBoundingClientRect();
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let left = cr.right - wr.left + 8;
+  if (left + tw > wr.width) left = cr.left - wr.left - 8 - tw;
+  left = Math.max(0, Math.min(wr.width - tw, left));
+  let top = cr.top - wr.top - th - 6; // above the cell, so the row stays visible
+  if (top < 0) top = cr.bottom - wr.top + 6;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+
+function initHeatTooltip() {
+  const container = document.getElementById('hourHeatmap');
+  let lastPointerType = 'mouse';
+  const cellOf = (e) => e.target.closest && e.target.closest('rect[data-h]');
+  container.addEventListener('pointerover', (e) => {
+    lastPointerType = e.pointerType;
+    if (e.pointerType !== 'mouse') return;
+    const cell = cellOf(e);
+    if (cell) showHeatTooltip(cell.dataset.line, Number(cell.dataset.h), false);
+  });
+  container.addEventListener('pointerdown', (e) => {
+    lastPointerType = e.pointerType;
+    if (e.pointerType === 'mouse') return;
+    const cell = cellOf(e);
+    if (cell) showHeatTooltip(cell.dataset.line, Number(cell.dataset.h), true);
+    else hideHeatTooltip();
+  });
+  container.addEventListener('pointerleave', (e) => {
+    if (e.pointerType === 'mouse') hideHeatTooltip();
+  });
+  container.addEventListener('scroll', () => { if (heatHover) showHeatTooltip(heatHover.line, heatHover.h, heatHover.pinned); });
+  container.addEventListener('click', (e) => {
+    if (lastPointerType !== 'mouse' && e.target.closest('svg a')) e.preventDefault();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (heatHover?.pinned && !document.getElementById('hourHeatmapWrap').contains(e.target)) hideHeatTooltip();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && heatHover) hideHeatTooltip();
+  });
 }
 
 async function refreshHeatmap() {
@@ -588,11 +689,13 @@ async function refreshHeatmap() {
     if (!res.ok) throw new Error(d.error || res.statusText);
     if (d.error === 'history disabled') {
       container.innerHTML = '';
+      hideHeatTooltip();
       document.getElementById('heatmapCaption').textContent = '';
       return;
     }
     renderHeatmap(d);
   } catch (err) {
+    hideHeatTooltip();
     document.getElementById('heatmapCaption').textContent = '';
     container.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="heatmap">Erneut versuchen</button></div>`;
   }
@@ -652,6 +755,7 @@ async function init() {
   } catch (err) { /* defaults */ }
   initLineFilter();
   initChartTooltip();
+  initHeatTooltip();
   initToggleGroup('punctualityWindow', (v) => { punctualityWindow = v; refreshPunctuality(); });
   initToggleGroup('heatmapWindow', (v) => { heatmapWindow = v; refreshHeatmap(); });
   initToggleGroup('heatmapDays', (v) => { heatmapDays = v; refreshHeatmap(); });

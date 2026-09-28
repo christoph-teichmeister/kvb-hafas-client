@@ -235,9 +235,10 @@ p.subtitle { color: var(--text-secondary); margin: 0 0 8px; font-size: 13px; }
 #hourHeatmap svg { width: 100%; min-width: 480px; height: auto; display: block; }
 #hourHeatmap a { cursor: pointer; }
 .heat-cell { fill: var(--heat); }
-.heat-empty { fill: none; stroke: var(--border); stroke-width: 1; }
+.heat-empty { fill: none; stroke: var(--border); stroke-width: 1; pointer-events: all; }
 #hourHeatmap a:hover .heat-cell, #hourHeatmap a:focus-visible .heat-cell { stroke: var(--text-primary); stroke-width: 1; }
 #hourHeatmap a:focus-visible { outline: none; }
+#hourHeatmap rect.active { stroke: var(--text-primary); stroke-width: 2; }
 .heat-scale { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--text-tertiary); }
 .heat-ramp {
   width: 120px; height: 8px; border-radius: 4px;
@@ -267,6 +268,8 @@ p.subtitle { color: var(--text-secondary); margin: 0 0 8px; font-size: 13px; }
 .chart-tooltip tr.nearest td { font-weight: 700; }
 .chart-tooltip tr.thin td:not(.n) { opacity: .6; }
 .chart-tooltip a { color: inherit; text-decoration: underline; text-decoration-color: var(--text-tertiary); }
+.chart-tooltip .tip-head .swatch { vertical-align: 1px; }
+.chart-tooltip tr.thin-warn .n { color: var(--text-secondary); }
 .chart-tooltip .tip-hint { margin-top: 4px; font-size: 11px; color: var(--text-tertiary); }
 
 /* Home directory menu — a wayfinding index, not a grid of icon+heading+text
