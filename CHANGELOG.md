@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.9.10] - 2026-09-28
+
+### Features
+- hover/tap tooltips for punctuality chart and heatmap (#16)
+
+
 ## [2026.9.9] - 2026-09-27
 
 ### Other
