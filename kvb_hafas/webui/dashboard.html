@@ -38,13 +38,13 @@
     <button type="button" data-value="24h">24h</button>
     <button type="button" data-value="1h">1h</button>
   </div>
-  <div id="punctualityChart"></div>
+  <div id="punctualityChart" class="chart-wrap"></div>
   <div class="line-filter" id="lineFilter" hidden>
     <ul class="chart-legend" id="chartLegend" role="group" aria-label="Linien ein-/ausblenden"></ul>
     <div class="line-filter-actions">
       <button type="button" data-lines="all">Alle</button>
       <button type="button" data-lines="none">Keine</button>
-      <span class="hint">Klick blendet Linie ein/aus, Doppelklick zeigt nur diese Linie · Klick auf die Kurve öffnet die Linie auf der Karte</span>
+      <span class="hint">Klick blendet Linie ein/aus, Doppelklick zeigt nur diese Linie · Kurve antippen/überfahren zeigt alle Werte, Klick öffnet die Linie auf der Karte</span>
     </div>
   </div>
   <p class="chart-caption" id="punctualityCaption"></p>
@@ -270,30 +270,172 @@ function renderPunctualityChart(data) {
     });
     if (current.length) runs.push(current);
 
-    svg += `<a href="${mapHref(line)}" class="series" data-line="${line}"><title>Linie ${line} auf der Karte zeigen</title>`;
+    svg += `<a href="${mapHref(line)}" class="series" data-line="${line}" aria-label="Linie ${line} auf der Karte zeigen">`;
     for (const run of runs) {
       const pts = run.map(([i, v]) => `${x(i)},${y(v)}`).join(' ');
       svg += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
       for (const [i, v] of run) {
         const n = counts[i];
         const thin = n !== undefined && n < MIN_SAMPLES;
-        const nLabel = n === undefined ? '' : ` · ${n} Beobachtungen${thin ? ' (wenig Daten)' : ''}`;
         const style = thin ? `style="fill:var(--surface)" stroke="${color}" stroke-width="1.5" class="thin"` : `fill="${color}"`;
-        svg += `<circle cx="${x(i)}" cy="${y(v)}" r="3.5" ${style}><title>Linie ${line}: ${pct(v)} pünktlich um ${fmtBucketLabel(buckets[i], punctualityWindow)}${nLabel}</title></circle>`;
+        svg += `<circle cx="${x(i)}" cy="${y(v)}" r="3.5" data-i="${i}" ${style}/>`;
       }
     }
     svg += '</a>';
   }
+  // Crosshair for the hover tooltip; drawn last so it sits on top, but
+  // pointer-events:none so clicks still reach the series links below.
+  svg += `<line class="hover-guide" x1="0" x2="0" y1="${padT}" y2="${padT + plotH}" visibility="hidden"/>`;
   if (!shownLines.length) {
     svg += `<text x="${padL + plotW / 2}" y="${padT + plotH / 2}" text-anchor="middle" font-size="11" style="fill:var(--text-tertiary)">keine Linie ausgewählt</text>`;
   }
   svg += '</svg>';
 
-  container.innerHTML = svg;
+  container.innerHTML = svg + '<div class="chart-tooltip" role="tooltip" hidden></div>';
+  chartGeom = { x, y, padL, plotW, shownLines, buckets, linesData, countsData };
+  if (hoverState) showChartTooltip(hoverState.i, hoverState.vy, hoverState.pinned);
   renderLegend(activeLines);
   filter.hidden = false;
   document.getElementById('punctualityCaption').textContent = lateCaption(data.late_from_minutes) +
     ` Hohle Punkte: weniger als ${MIN_SAMPLES} Beobachtungen.`;
+}
+
+// Hover/tap tooltip for the punctuality chart. Snaps to the nearest bucket
+// and lists every shown line there (sorted like the curves, best on top), so
+// one hover answers "how did all lines do at 09:00" — the native <title> only
+// appeared after a delay, on exactly one dot, and never on touch.
+let chartGeom = null;
+let hoverState = null; // { i, vy, pinned } — survives the periodic re-render
+
+function fmtTooltipHeader(buckets, i, window) {
+  const d = new Date(buckets[i] * 1000);
+  const wd = d.toLocaleDateString('de-DE', { weekday: 'short' });
+  if (window === '7d') return `${wd}, ${fmtBucketLabel(buckets[i], window)}`;
+  const step = buckets.length > 1 ? buckets[1] - buckets[0] : 0;
+  const end = step ? `–${fmtBucketLabel(buckets[i] + step, window)}` : '';
+  return `${wd} ${fmtBucketLabel(buckets[i], window)}${end} Uhr`;
+}
+
+function svgPoint(svg, clientX, clientY) {
+  const m = svg.getScreenCTM();
+  if (!m) return null;
+  const p = new DOMPoint(clientX, clientY).matrixTransform(m.inverse());
+  return { x: p.x, y: p.y };
+}
+
+function nearestBucket(vx) {
+  const { padL, plotW, buckets } = chartGeom;
+  if (buckets.length === 1) return 0;
+  const i = Math.round(((vx - padL) / plotW) * (buckets.length - 1));
+  return Math.max(0, Math.min(buckets.length - 1, i));
+}
+
+function hideChartTooltip() {
+  hoverState = null;
+  const container = document.getElementById('punctualityChart');
+  const tip = container.querySelector('.chart-tooltip');
+  if (tip) tip.hidden = true;
+  const guide = container.querySelector('.hover-guide');
+  if (guide) guide.setAttribute('visibility', 'hidden');
+  container.querySelectorAll('circle.active').forEach(c => c.classList.remove('active'));
+}
+
+function showChartTooltip(i, vy, pinned) {
+  const container = document.getElementById('punctualityChart');
+  const svg = container.querySelector('svg');
+  const tip = container.querySelector('.chart-tooltip');
+  if (!chartGeom || !svg || !tip) return;
+  const { x, y, shownLines, buckets, linesData, countsData } = chartGeom;
+  if (i >= buckets.length) { hideChartTooltip(); return; }
+
+  const rows = shownLines
+    .map(line => ({ line, v: linesData[line][i], n: (countsData[line] || [])[i] }))
+    .filter(r => r.v !== null && r.v !== undefined)
+    .sort((a, b) => b.v - a.v || TRAM_LINES.indexOf(a.line) - TRAM_LINES.indexOf(b.line));
+  if (!rows.length) { hideChartTooltip(); return; }
+  hoverState = { i, vy, pinned };
+
+  // The line whose dot is closest to the pointer gets emphasized — in a
+  // bundle of 12 curves that's the one the user is most likely aiming at.
+  let nearest = rows[0];
+  for (const r of rows) if (Math.abs(y(r.v) - vy) < Math.abs(y(nearest.v) - vy)) nearest = r;
+
+  const guide = svg.querySelector('.hover-guide');
+  guide.setAttribute('x1', x(i));
+  guide.setAttribute('x2', x(i));
+  guide.setAttribute('visibility', 'visible');
+  svg.querySelectorAll('circle.active').forEach(c => c.classList.remove('active'));
+  const dot = svg.querySelector(`.series[data-line="${nearest.line}"] circle[data-i="${i}"]`);
+  if (dot) dot.classList.add('active');
+
+  const rowHtml = rows.map(r => {
+    const thin = r.n !== undefined && r.n < MIN_SAMPLES;
+    const nText = r.n === undefined ? '' : `${r.n} Beob.`;
+    const name = pinned
+      ? `<a href="${mapHref(r.line)}">Linie ${r.line}</a>`
+      : `Linie ${r.line}`;
+    return `<tr class="${r === nearest ? 'nearest' : ''}${thin ? ' thin' : ''}">` +
+      `<td><span class="swatch" style="background:${lineColor(r.line)}"></span>${name}</td>` +
+      `<td class="num">${pct(r.v)}</td><td class="num n">${nText}${thin ? ' ⚠' : ''}</td></tr>`;
+  }).join('');
+  const hint = pinned ? '<div class="tip-hint">Linie antippen → Karte</div>' : '';
+  tip.innerHTML = `<div class="tip-head">${fmtTooltipHeader(buckets, i, punctualityWindow)}</div>` +
+    `<table>${rowHtml}</table>${hint}`;
+  tip.classList.toggle('pinned', !!pinned);
+  tip.hidden = false;
+
+  // Position in container pixels: beside the crosshair, flipped to the left
+  // half when it would overflow, vertically clamped to the chart.
+  const scale = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
+  const gx = x(i) * scale;
+  const cw = container.clientWidth;
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let left = gx + 14;
+  if (left + tw > cw) left = gx - 14 - tw;
+  left = Math.max(0, Math.min(cw - tw, left));
+  const top = Math.max(0, Math.min(svg.getBoundingClientRect().height - th, vy * scale - th / 2));
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+
+function initChartTooltip() {
+  const container = document.getElementById('punctualityChart');
+  let lastPointerType = 'mouse';
+  const fromEvent = (e) => {
+    const svg = container.querySelector('svg');
+    if (!svg || !chartGeom) return null;
+    const p = svgPoint(svg, e.clientX, e.clientY);
+    return p && { i: nearestBucket(p.x), vy: p.y };
+  };
+  container.addEventListener('pointermove', (e) => {
+    if (e.target.closest('.chart-tooltip')) return;
+    lastPointerType = e.pointerType;
+    // Touch: only scrub while the tooltip is already pinned (horizontal drag;
+    // vertical drags still scroll the page via touch-action: pan-y).
+    if (e.pointerType === 'touch' && !hoverState?.pinned) return;
+    const h = fromEvent(e);
+    if (h) showChartTooltip(h.i, h.vy, e.pointerType === 'touch');
+  });
+  container.addEventListener('pointerdown', (e) => {
+    lastPointerType = e.pointerType;
+    if (e.pointerType === 'mouse' || e.target.closest('.chart-tooltip')) return;
+    const h = fromEvent(e);
+    if (h) showChartTooltip(h.i, h.vy, true);
+  });
+  container.addEventListener('pointerleave', (e) => {
+    if (e.pointerType === 'mouse') hideChartTooltip();
+  });
+  // On touch the first tap on a curve shows the values instead of jumping to
+  // the map; the tooltip rows carry the map links instead.
+  container.addEventListener('click', (e) => {
+    if (lastPointerType !== 'mouse' && e.target.closest('svg a.series')) e.preventDefault();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (hoverState?.pinned && !container.contains(e.target)) hideChartTooltip();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && hoverState) hideChartTooltip();
+  });
 }
 
 function lateCaption(lateFrom) {
@@ -509,6 +651,7 @@ async function init() {
     }
   } catch (err) { /* defaults */ }
   initLineFilter();
+  initChartTooltip();
   initToggleGroup('punctualityWindow', (v) => { punctualityWindow = v; refreshPunctuality(); });
   initToggleGroup('heatmapWindow', (v) => { heatmapWindow = v; refreshHeatmap(); });
   initToggleGroup('heatmapDays', (v) => { heatmapDays = v; refreshHeatmap(); });
