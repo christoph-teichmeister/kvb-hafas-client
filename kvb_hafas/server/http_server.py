@@ -167,6 +167,24 @@ _client = KVBHafasClient(min_interval=1.0)
 _lock = threading.Lock()
 _cache: dict[tuple[float, ...], tuple[float, dict]] = {}
 _alerts: tuple[float, list[dict]] | None = None
+_stats_cache: dict[tuple, tuple[float, dict]] = {}
+
+# Stats queries scan the history DB and the dashboard re-polls them; the
+# picture barely moves within these windows.
+STATS_CACHE_TTL_SECONDS = _env_float("STATS_CACHE_TTL_SECONDS", 60.0)
+HEATMAP_CACHE_TTL_SECONDS = _env_float("HEATMAP_CACHE_TTL_SECONDS", 300.0)
+
+
+def _stats_cached(key: tuple, ttl: float, produce) -> dict:
+    now = time.monotonic()
+    with _lock:
+        hit = _stats_cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    value = produce()
+    with _lock:
+        _stats_cache[key] = (now, value)
+    return value
 
 _segments: dict[tuple[str, str], list[tuple[float, float]]] = {}
 _line_paths: dict[str, dict[tuple[str, str], list[tuple[float, float]]]] = {}
@@ -627,7 +645,7 @@ class Handler(BaseHTTPRequestHandler):
             stats["max_delay_detail"] = _history.max_delay_detail(ts_from=ts_from, ts_to=ts_to)
             return stats
 
-        self._guarded(_combined)
+        self._guarded(lambda: _stats_cached(("delays", ts_from, ts_to), STATS_CACHE_TTL_SECONDS, _combined))
 
     def _stats_punctuality_trend_route(self, query: dict) -> None:
         if not _history:
@@ -635,7 +653,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         window = (query.get("window", ["7d"])[0]) or "7d"
         window_seconds, bucket_seconds = PUNCTUALITY_WINDOWS.get(window, PUNCTUALITY_WINDOWS["7d"])
-        self._guarded(lambda: _history.punctuality_trend(window_seconds, bucket_seconds, late_from=LATE_FROM))
+        self._guarded(
+            lambda: _stats_cached(
+                ("trend", window_seconds, bucket_seconds),
+                STATS_CACHE_TTL_SECONDS,
+                lambda: _history.punctuality_trend(window_seconds, bucket_seconds, late_from=LATE_FROM),
+            )
+        )
 
     def _stats_punctuality_by_hour_route(self, query: dict) -> None:
         if not _history:
@@ -644,7 +668,13 @@ class Handler(BaseHTTPRequestHandler):
         window = (query.get("window", ["28d"])[0]) or "28d"
         window_seconds = PUNCTUALITY_HOUR_WINDOWS.get(window, PUNCTUALITY_HOUR_WINDOWS["28d"])
         days = (query.get("days", ["all"])[0]) or "all"
-        self._guarded(lambda: _history.punctuality_by_hour(window_seconds, late_from=LATE_FROM, days=days))
+        self._guarded(
+            lambda: _stats_cached(
+                ("hour", window_seconds, days),
+                HEATMAP_CACHE_TTL_SECONDS,
+                lambda: _history.punctuality_by_hour(window_seconds, late_from=LATE_FROM, days=days),
+            )
+        )
 
     def _history_trip_route(self, query: dict) -> None:
         jid = (query.get("jid", [""])[0]).strip()

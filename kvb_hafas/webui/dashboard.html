@@ -34,11 +34,11 @@
 
   <h2>Pünktlichkeit je Linie</h2>
   <div class="window-toggle" role="group" aria-label="Zeitraum" id="punctualityWindow">
-    <button type="button" data-value="7d" class="active">7 Tage</button>
-    <button type="button" data-value="24h">24h</button>
+    <button type="button" data-value="7d">7 Tage</button>
+    <button type="button" data-value="24h" class="active">24h</button>
     <button type="button" data-value="1h">1h</button>
   </div>
-  <div id="punctualityChart" class="chart-wrap"></div>
+  <div id="punctualityChart" class="chart-wrap"><div class="chart-loading" role="status"><span class="spinner"></span>Lade Daten …</div></div>
   <div class="line-filter" id="lineFilter" hidden>
     <ul class="chart-legend" id="chartLegend" role="group" aria-label="Linien ein-/ausblenden"></ul>
     <div class="line-filter-actions">
@@ -52,8 +52,8 @@
   <h2>Pünktlichkeit nach Tageszeit</h2>
   <div class="toggle-row">
     <div class="window-toggle" role="group" aria-label="Zeitraum" id="heatmapWindow">
-      <button type="button" data-value="28d" class="active">28 Tage</button>
-      <button type="button" data-value="7d">7 Tage</button>
+      <button type="button" data-value="28d">28 Tage</button>
+      <button type="button" data-value="7d" class="active">7 Tage</button>
     </div>
     <div class="window-toggle" role="group" aria-label="Wochentage" id="heatmapDays">
       <button type="button" data-value="all" class="active">Alle Tage</button>
@@ -63,7 +63,7 @@
     </div>
   </div>
   <div class="chart-wrap" id="hourHeatmapWrap">
-    <div id="hourHeatmap"></div>
+    <div id="hourHeatmap"><div class="chart-loading" role="status"><span class="spinner"></span>Lade Daten …</div></div>
     <div class="chart-tooltip" id="heatTooltip" role="tooltip" hidden></div>
   </div>
   <p class="chart-caption" id="heatmapCaption"></p>
@@ -167,7 +167,7 @@ async function refreshDelays() {
 // sampler tick) than this are drawn faded: a rate from 3 samples is noise.
 const MIN_SAMPLES = 20;
 
-let punctualityWindow = '7d';
+let punctualityWindow = '24h';
 const WINDOW_LABELS = { '7d': 'über 7 Tage', '24h': 'über 24 Stunden', '1h': 'über die letzte Stunde' };
 
 function fmtBucketLabel(ts, window) {
@@ -512,7 +512,7 @@ function initLineFilter() {
 // clock (and immediately on toggle changes).
 const HEATMAP_REFRESH_SECONDS = 300;
 const DAY_LABELS = { all: 'alle Tage', weekday: 'Mo–Fr', sat: 'Samstag', sun: 'Sonntag' };
-let heatmapWindow = '28d';
+let heatmapWindow = '7d';
 let heatmapDays = 'all';
 let lastHeatmap = null;
 
@@ -681,23 +681,61 @@ function initHeatTooltip() {
   });
 }
 
-async function refreshHeatmap() {
+function showHeatmap(d) {
   const container = document.getElementById('hourHeatmap');
-  try {
-    const res = await fetch(`api/stats/punctuality-by-hour?window=${heatmapWindow}&days=${heatmapDays}`);
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.error || res.statusText);
-    if (d.error === 'history disabled') {
-      container.innerHTML = '';
-      hideHeatTooltip();
-      document.getElementById('heatmapCaption').textContent = '';
-      return;
-    }
-    renderHeatmap(d);
-  } catch (err) {
+  if (d.error === 'history disabled') {
+    container.innerHTML = '';
     hideHeatTooltip();
     document.getElementById('heatmapCaption').textContent = '';
+    return;
+  }
+  renderHeatmap(d);
+}
+
+async function refreshHeatmap() {
+  const container = document.getElementById('hourHeatmap');
+  const url = heatmapUrl();
+  const cached = apiCache.get(url);
+  if (cached) showHeatmap(cached);
+  else {
+    hideHeatTooltip();
+    document.getElementById('heatmapCaption').textContent = '';
+    container.innerHTML = LOADING_HTML;
+  }
+  try {
+    const d = await getJson(url);
+    if (url === heatmapUrl()) showHeatmap(d); // ignore answers for a toggle that was switched away meanwhile
+  } catch (err) {
+    if (url !== heatmapUrl() || cached) return;
+    hideHeatTooltip();
     container.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="heatmap">Erneut versuchen</button></div>`;
+  }
+}
+
+// Responses by URL. A toggle renders the last known answer instantly (no
+// spinner) and refetches behind it; the other windows are prefetched once the
+// default view is up, so the first toggle click is already warm.
+const apiCache = new Map();
+const LOADING_HTML = '<div class="chart-loading" role="status"><span class="spinner"></span>Lade Daten …</div>';
+
+async function getJson(url) {
+  const res = await fetch(url);
+  const d = await res.json();
+  if (!res.ok) throw new Error(d.error || res.statusText);
+  apiCache.set(url, d);
+  return d;
+}
+
+const punctualityUrl = (w = punctualityWindow) => `api/stats/punctuality-trend?window=${w}`;
+const heatmapUrl = (w = heatmapWindow, d = heatmapDays) => `api/stats/punctuality-by-hour?window=${w}&days=${d}`;
+
+async function prefetchOthers() {
+  const urls = [];
+  for (const w of ['7d', '1h']) urls.push(punctualityUrl(w));
+  for (const w of ['28d']) urls.push(heatmapUrl(w, heatmapDays));
+  for (const url of urls) {
+    if (apiCache.has(url)) continue;
+    try { await getJson(url); } catch (err) { /* best effort */ }
   }
 }
 
@@ -711,19 +749,30 @@ function initToggleGroup(id, onChange) {
   });
 }
 
+function showPunctuality(d) {
+  if (d.error === 'history disabled') {
+    document.getElementById('punctualityChart').innerHTML = ''; // historyNote is already set by refreshDelays()
+    document.getElementById('lineFilter').hidden = true;
+    return;
+  }
+  renderPunctualityChart(d);
+}
+
 async function refreshPunctuality() {
   const chart = document.getElementById('punctualityChart');
+  const url = punctualityUrl();
+  const cached = apiCache.get(url);
+  if (cached) showPunctuality(cached);
+  else {
+    document.getElementById('lineFilter').hidden = true;
+    document.getElementById('punctualityCaption').textContent = '';
+    chart.innerHTML = LOADING_HTML;
+  }
   try {
-    const res = await fetch(`api/stats/punctuality-trend?window=${punctualityWindow}`);
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.error || res.statusText);
-    if (d.error === 'history disabled') {
-      chart.innerHTML = ''; // historyNote is already set by refreshDelays()
-      document.getElementById('lineFilter').hidden = true;
-      return;
-    }
-    renderPunctualityChart(d);
+    const d = await getJson(url);
+    if (url === punctualityUrl()) showPunctuality(d);
   } catch (err) {
+    if (url !== punctualityUrl() || cached) return;
     document.getElementById('lineFilter').hidden = true;
     chart.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="punctuality">Erneut versuchen</button></div>`;
   }
@@ -763,6 +812,8 @@ async function init() {
   refreshAll();
   setInterval(refreshAll, refreshSeconds * 1000);
   refreshHeatmap();
+  // Let the default views win the (rate-limited) server first.
+  setTimeout(prefetchOthers, 1500);
   setInterval(refreshHeatmap, HEATMAP_REFRESH_SECONDS * 1000);
   document.body.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-retry]');

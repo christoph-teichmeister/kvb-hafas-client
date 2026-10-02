@@ -104,3 +104,18 @@ def test_history_db_file_env_override_wins(tmp_path, monkeypatch):
     (addon / "options.json").write_text("{}")
     monkeypatch.setenv("HISTORY_DB_FILE", str(tmp_path / "x.db"))
     assert _history_db_file(tmp_path / "app", addon) == tmp_path / "x.db"
+
+
+def test_stats_cached_reuses_value_within_ttl():
+    from kvb_hafas.server import http_server as hs
+
+    hs._stats_cache.clear()
+    calls = []
+
+    def produce():
+        calls.append(1)
+        return {"n": len(calls)}
+
+    assert hs._stats_cached(("t",), 60.0, produce) == {"n": 1}
+    assert hs._stats_cached(("t",), 60.0, produce) == {"n": 1}
+    assert hs._stats_cached(("t",), 0.0, produce) == {"n": 2}
