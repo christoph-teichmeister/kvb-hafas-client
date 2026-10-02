@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.0] - 2026-10-02
+
+### Features
+- loading spinners, stats cache and faster default windows (#17)
+
+
 ## [2026.9.10] - 2026-09-28
 
 ### Features
