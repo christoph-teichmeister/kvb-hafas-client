@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.1] - 2026-10-10
+
+### Other
+- ci: notify kvb-ha-map from the release workflow with the release version (#18)
+
+
 ## [2026.10.0] - 2026-10-02
 
 ### Features
