@@ -8,8 +8,9 @@ Inoffizieller Python-Client für Echtzeit-Fahrplandaten der Kölner Verkehrs-Bet
 -Endpoint (`https://auskunft.kvb.koeln/gate`). Keine offizielle API — nicht-kommerzielle Nutzung, rate-limit-freundlich,
 keine KVB-Markenverwendung.
 
-Companion-Repo: `kvb-ha-map` (Home Assistant Add-on), nutzt dieses Repo als ungepinnte Git-Dependency. Push auf `main`
-hier löst per `.github/workflows/notify-kvb-ha-map.yml` einen `repository_dispatch` dort aus. `kvb-ha-map` besitzt
+Companion-Repo: `kvb-ha-map` (Home Assistant Add-on), nutzt dieses Repo als ungepinnte Git-Dependency. Jedes Release
+hier (`.github/workflows/release.yml`, letzter Schritt) löst einen `repository_dispatch` dort aus; `kvb-ha-map`
+übernimmt die Release-Version 1:1 (Map-Version == Client-Version). `kvb-ha-map` besitzt
 keinen eigenen Server-/UI-Code — es ist nur Docker/Ingress/Config-Verpackung um `kvb_hafas.server.http_server`, den es
 direkt aus diesem Repo importiert und startet (`python -m kvb_hafas.server.http_server`). Server und UI werden also
 ausschließlich hier gepflegt.

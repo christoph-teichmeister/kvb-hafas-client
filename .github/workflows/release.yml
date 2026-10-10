@@ -123,3 +123,14 @@ jobs:
           gh release create "${{ steps.version.outputs.new_version }}" \
             --title "${{ steps.version.outputs.new_version }}" \
             --notes-file /tmp/changelog-entry.md
+
+      # kvb-ha-map takes this version 1:1 (map version == client version).
+      - name: Notify kvb-ha-map
+        env:
+          GH_TOKEN: ${{ secrets.KVB_HA_MAP_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api repos/christoph-teichmeister/kvb-ha-map/dispatches \
+            -f event_type=kvb-hafas-client-released \
+            -f "client_payload[sha]=$(git rev-parse HEAD)" \
+            -f "client_payload[version]=${{ steps.version.outputs.new_version }}"
