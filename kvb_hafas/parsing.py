@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from kvb_hafas.models import Line
 
@@ -21,14 +22,11 @@ MAX_PLAUSIBLE_DELAY_MINUTES = 180
 # meaningless (the +321 min case: predicted 13:26, actually there at 16:44).
 MAX_ETA_DRIFT_MINUTES = 60
 
-# HAFAS times are Cologne wall-clock times. Falls back to the container's
-# local time if the tz database isn't installed (e.g. a slim image).
-try:
-    from zoneinfo import ZoneInfo
-
-    LOCAL_TZ: tzinfo | None = ZoneInfo("Europe/Berlin")
-except Exception:  # ImportError or ZoneInfoNotFoundError
-    LOCAL_TZ = None
+# HAFAS times are Cologne wall-clock times. The `tzdata` dependency ships the
+# zone, so this works on slim images too. No fallback on purpose: guessing the
+# container's zone (often UTC) would shift every prediction by 1-2 h and the
+# ETA check would silently drop every delay.
+LOCAL_TZ: tzinfo = ZoneInfo("Europe/Berlin")
 
 
 def _line_from_prod(prod: dict[str, Any], line_id: str, op_l: list[dict[str, Any]] | None = None) -> Line:
