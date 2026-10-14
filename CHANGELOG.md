@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.5] - 2026-10-14
+
+### Other
+- Read the HAFAS AID at runtime instead of shipping it; mark UI as unofficial (#22)
+
+
 ## [2026.10.4] - 2026-10-14
 
 ### Fixes
