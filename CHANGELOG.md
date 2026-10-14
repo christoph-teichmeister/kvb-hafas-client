@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.2] - 2026-10-14
+
+### Other
+- perf(history): serve stats from an hourly summary table (#19)
+
+
 ## [2026.10.1] - 2026-10-10
 
 ### Other
