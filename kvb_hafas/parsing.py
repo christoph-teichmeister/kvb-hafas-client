@@ -3,17 +3,32 @@
 from __future__ import annotations
 
 import logging
-
+from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
 from kvb_hafas.models import Line
 
 log = logging.getLogger(__name__)
 
-# Beyond this a delay is a parsing/data glitch, not a real delay (seen once:
-# +4599 min on a tram crossing midnight). Dropped and logged with the raw
-# HAFAS strings so the next occurrence shows the cause.
-MAX_PLAUSIBLE_DELAY_MINUTES = 360
+# Beyond this a delay is a data glitch, not a real delay: a tram doesn't run
+# 3 h late, it gets cancelled. Seen: +4599 min at midnight, +321 min on a
+# morning trip that actually ran 8.5 h late. Dropped and logged with the raw
+# HAFAS strings.
+MAX_PLAUSIBLE_DELAY_MINUTES = 180
+
+# A vehicle's realtime prediction for the stop it is heading to must lie near
+# "now"; if not, HAFAS has tied the vehicle to the wrong trip and its delay is
+# meaningless (the +321 min case: predicted 13:26, actually there at 16:44).
+MAX_ETA_DRIFT_MINUTES = 60
+
+# HAFAS times are Cologne wall-clock times. Falls back to the container's
+# local time if the tz database isn't installed (e.g. a slim image).
+try:
+    from zoneinfo import ZoneInfo
+
+    LOCAL_TZ: tzinfo | None = ZoneInfo("Europe/Berlin")
+except Exception:  # ImportError or ZoneInfoNotFoundError
+    LOCAL_TZ = None
 
 
 def _line_from_prod(prod: dict[str, Any], line_id: str, op_l: list[dict[str, Any]] | None = None) -> Line:
@@ -104,18 +119,30 @@ def _mast_steig(loc_l: list[dict[str, Any]], loc_x: int | None) -> str | None:
     return None
 
 
+def _hafas_minutes(t: str) -> int:
+    """Minuten seit Mitternacht des Fahrtdatums ("224400"; "01000300" = Folgetag 00:03)."""
+    days = int(t[:-6] or 0) if len(t) > 6 else 0
+    t = t[-6:]
+    return days * 1440 + int(t[:2]) * 60 + int(t[2:4])
+
+
+def _eta_matches_now(date: str, realtime: str, now: float) -> bool:
+    """Liegt die Echtzeit-Prognose `realtime` der Fahrt vom `date` (YYYYMMDD)
+    höchstens MAX_ETA_DRIFT_MINUTES von `now` (Unix-Zeit) entfernt?
+    Unbekanntes Format zählt als passend — dann wird nichts verworfen."""
+    try:
+        wall = datetime.strptime(date, "%Y%m%d") + timedelta(minutes=_hafas_minutes(realtime))
+    except ValueError:
+        return True
+    return abs(wall.replace(tzinfo=LOCAL_TZ).timestamp() - now) <= MAX_ETA_DRIFT_MINUTES * 60
+
+
 def _delay_minutes(planned: str, realtime: str) -> int | None:
     """Verspätung in Minuten aus zwei HAFAS-Zeiten ("224400", ggf. mit Tages-Prefix)."""
     if not planned or not realtime:
         return None
-
-    def minutes(t: str) -> int:
-        days = int(t[:-6] or 0) if len(t) > 6 else 0
-        t = t[-6:]
-        return days * 1440 + int(t[:2]) * 60 + int(t[2:4])
-
     try:
-        delay = minutes(realtime) - minutes(planned)
+        delay = _hafas_minutes(realtime) - _hafas_minutes(planned)
     except ValueError:
         return None
     if abs(delay) > MAX_PLAUSIBLE_DELAY_MINUTES:

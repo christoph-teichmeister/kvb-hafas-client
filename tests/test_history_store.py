@@ -336,3 +336,43 @@ def test_is_corruption_message_fallback():
     assert _is_corruption(sqlite3.DatabaseError("database disk image is malformed"))
     assert _is_corruption(sqlite3.DatabaseError("file is not a database"))
     assert not _is_corruption(sqlite3.DatabaseError("database is locked"))
+
+
+def test_outdated_summary_is_rebuilt_with_current_filters(tmp_path):
+    """Bumping SUMMARY_VERSION rebuilds stats.db from the raw samples and
+    applies a tightened delay cap retroactively."""
+    import sqlite3
+
+    from kvb_hafas.server.history_store import SUMMARY_VERSION
+
+    db = tmp_path / "history.db"
+    s = HistoryStore(db)
+    s.record_vehicles([_obs("t1", "16", "Str", 2), _obs("wrong-trip", "16", "Str", 321)], observed_at=int(time.time()))
+    assert s.delay_stats()["max_delay_minutes"] == 321  # write path doesn't cap, parsing does
+    s.close()
+
+    conn = sqlite3.connect(str(tmp_path / "stats.db"))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SUMMARY_VERSION
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    s = HistoryStore(db)
+    try:
+        stats = s.delay_stats()
+        assert stats["max_delay_minutes"] == 2
+        assert stats["lines"][0]["observations"] == 1
+    finally:
+        s.close()
+
+    # current version: no rebuild on the next start
+    s = HistoryStore(db)
+    try:
+        s.record_vehicles([_obs("t2", "16", "Str", 4)], observed_at=int(time.time()))
+    finally:
+        s.close()
+    s = HistoryStore(db)
+    try:
+        assert s.delay_stats()["lines"][0]["observations"] == 2
+    finally:
+        s.close()

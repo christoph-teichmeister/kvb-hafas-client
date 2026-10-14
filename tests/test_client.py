@@ -1113,3 +1113,44 @@ def test_delay_minutes_handles_day_rollover_and_drops_implausible(caplog):
     with caplog.at_level("WARNING"):
         assert _delay_minutes("235800", "04043700") is None
     assert "04043700" in caplog.text
+
+
+def test_next_stop_delay_drops_realtime_that_doesnt_match_now(caplog):
+    """Wrong-trip case: the vehicle runs a morning trip in the afternoon, its
+    prediction for the next stop (here 09:10, +65 min) is hours away from now
+    (16:44). Seen live with +321 min, which the cap now also catches."""
+    from datetime import datetime
+
+    from kvb_hafas.client import KVBHafasClient
+    from kvb_hafas.parsing import LOCAL_TZ
+
+    loc_l = [{"name": "Anfang"}, {"name": "Ebertplatz"}]
+    jny = {
+        "jid": "1|6645|0|1|13102026",
+        "date": "20261013",
+        "stopL": [{"locX": 1, "aTimeS": "080500", "aTimeR": "091000"}],
+    }
+    at_1644 = datetime(2026, 10, 13, 16, 44, tzinfo=LOCAL_TZ).timestamp()
+    at_0905 = datetime(2026, 10, 13, 9, 5, tzinfo=LOCAL_TZ).timestamp()
+
+    with caplog.at_level("WARNING"):
+        assert KVBHafasClient._next_stop_delay(jny, loc_l, 1, at_1644) == (None, "Ebertplatz")
+    assert "stale realtime" in caplog.text
+    assert KVBHafasClient._next_stop_delay(jny, loc_l, 1, at_0905) == (65, "Ebertplatz")  # real 65 min delay
+
+    jny["stopL"][0]["aTimeR"] = "081000"
+    at_0809 = datetime(2026, 10, 13, 8, 9, tzinfo=LOCAL_TZ).timestamp()
+    assert KVBHafasClient._next_stop_delay(jny, loc_l, 1, at_0809) == (5, "Ebertplatz")
+    # unknown date format: no check, delay kept
+    jny["date"] = ""
+    assert KVBHafasClient._next_stop_delay(jny, loc_l, 1, at_1644) == (5, "Ebertplatz")
+
+
+def test_eta_check_uses_wall_clock_across_midnight():
+    from datetime import datetime
+
+    from kvb_hafas.parsing import LOCAL_TZ, _eta_matches_now
+
+    after_midnight = datetime(2026, 10, 14, 0, 3, tzinfo=LOCAL_TZ).timestamp()
+    assert _eta_matches_now("20261013", "01000500", after_midnight)
+    assert not _eta_matches_now("20261013", "000500", after_midnight)  # 23:58 h earlier

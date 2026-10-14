@@ -12,6 +12,7 @@ verwenden.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -40,12 +41,15 @@ from kvb_hafas.parsing import (
     _ani_track,
     _decode_polyline,
     _delay_minutes,
+    _eta_matches_now,
     _line_from_prod,
     _mast_steig,
     _prod_colours,
     _prod_name,
     station_ext_id,
 )
+
+log = logging.getLogger(__name__)
 
 ENDPOINT = "https://auskunft.kvb.koeln/gate"
 # Public HAFAS access ID, served in cleartext by the KVB widget generator at
@@ -770,6 +774,7 @@ class KVBHafasClient:
         common = res.get("common", {})
         prod_l, loc_l = common.get("prodL", []), common.get("locL", [])
         ico_l = common.get("icoL", [])
+        now = float(res.get("planrtTS") or time.time())
         vehicles = []
         for jny in res.get("jnyL", []):
             pos = jny.get("pos")
@@ -780,7 +785,7 @@ class KVBHafasClient:
             bearing = jny.get("dirGeo")
             ani = jny.get("ani") or {}
             next_loc_x = (ani.get("tLocX") or [None])[0]
-            delay, next_stop = self._next_stop_delay(jny, loc_l, next_loc_x)
+            delay, next_stop = self._next_stop_delay(jny, loc_l, next_loc_x, now)
             colour, text_colour = _prod_colours(prod, ico_l)
             vehicles.append(
                 Vehicle(
@@ -802,13 +807,14 @@ class KVBHafasClient:
 
     @staticmethod
     def _next_stop_delay(
-        jny: dict[str, Any], loc_l: list[dict[str, Any]], next_loc_x: int | None
+        jny: dict[str, Any], loc_l: list[dict[str, Any]], next_loc_x: int | None, now: float | None = None
     ) -> tuple[int | None, str]:
         """Verspätung und Name des Halts, auf den das Fahrzeug gerade zufährt.
 
         `ani.tLocX[0]` benennt diesen Halt; der passende Eintrag in `stopL`
         trägt Soll- und Ist-Zeit. Ohne Echtzeit-Prognose bleibt die Verspätung
-        None — das ist etwas anderes als "pünktlich".
+        None — das ist etwas anderes als "pünktlich". Ebenso, wenn die Prognose
+        nicht zu `now` passt (Fahrzeug der falschen Fahrt zugeordnet).
         """
         if next_loc_x is None or not (0 <= next_loc_x < len(loc_l)):
             return None, ""
@@ -818,8 +824,15 @@ class KVBHafasClient:
                 continue
             for planned, realtime in (("aTimeS", "aTimeR"), ("dTimeS", "dTimeR")):
                 delay = _delay_minutes(stop.get(planned, ""), stop.get(realtime, ""))
-                if delay is not None:
-                    return delay, name
+                if delay is None:
+                    continue
+                if now is not None and not _eta_matches_now(jny.get("date", ""), stop[realtime], now):
+                    log.warning(
+                        "stale realtime for %s: %s=%s on %s doesn't match now, delay %+d dropped",
+                        jny.get("jid"), realtime, stop[realtime], jny.get("date"), delay,
+                    )
+                    return None, name
+                return delay, name
             break
         return None, name
 

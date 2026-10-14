@@ -16,7 +16,7 @@ from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from kvb_hafas.parsing import MAX_PLAUSIBLE_DELAY_MINUTES
+from kvb_hafas.parsing import LOCAL_TZ, MAX_PLAUSIBLE_DELAY_MINUTES
 
 _T = TypeVar("_T")
 
@@ -29,14 +29,8 @@ _TRAM_CATEGORY_SQL = (
 )
 
 # Hour-of-day stats are about when a Cologne commuter rides, so they're bucketed
-# in Europe/Berlin local time. Falls back to the container's local time if the
-# tz database isn't installed (e.g. a slim image without tzdata).
-try:
-    from zoneinfo import ZoneInfo
-
-    _LOCAL_TZ: tzinfo | None = ZoneInfo("Europe/Berlin")
-except Exception:  # ImportError or ZoneInfoNotFoundError
-    _LOCAL_TZ = None
+# in Europe/Berlin local time.
+_LOCAL_TZ = LOCAL_TZ
 
 # Day-type filters for punctuality_by_hour, as sets of datetime.weekday() values.
 DAY_TYPES = {
@@ -66,6 +60,11 @@ CREATE INDEX IF NOT EXISTS idx_vehicle_observations_observed_at ON vehicle_obser
 -- time-range scans the raw queries need.
 DROP INDEX IF EXISTS idx_vehicle_observations_line;
 """
+
+# Bump to rebuild stats.db from the raw samples on the next start, e.g. after
+# tightening the delay filters (stored as stats.db's PRAGMA user_version).
+# 2: delay cap 360 -> 180 min, drops the +321 min wrong-trip samples.
+SUMMARY_VERSION = 2
 
 # Tram-only per-line/per-hour aggregates, kept in a separate file (stats.db)
 # forever: a few MB per year, so every dashboard stat is a small range scan
@@ -232,8 +231,8 @@ class HistoryStore:
     delay_minutes >= `late_from`, fixed per store because the summary counts
     late samples at write time.
 
-    ponytail: changing `late_from` needs a fresh stats.db (delete it; it is
-    rebuilt from the raw samples on start). LATE_FROM is a constant today.
+    ponytail: changing `late_from` needs a SUMMARY_VERSION bump (rebuild from
+    the raw samples). LATE_FROM is a constant today.
     """
 
     def __init__(self, db_path: Path, late_from: int = 3) -> None:
@@ -246,14 +245,21 @@ class HistoryStore:
         return self._raw.run(fn)
 
     def _backfill_summary(self) -> None:
-        """Build the summary from all raw samples when it is empty (first start
-        after the upgrade, or a lost stats.db). Also nulls implausible delays
-        recorded before parsing capped them.
+        """(Re)build the summary from all raw samples when it is empty (first
+        start after the upgrade, or a lost stats.db) or older than
+        SUMMARY_VERSION. Also nulls implausible delays in the raw samples, so
+        a tightened cap applies retroactively.
 
         ponytail: one full scan, blocking startup; ~1 s per 150k samples on a
         Pi. Fine for a one-off; move to a thread if a full year ever needs it.
         """
-        if self._summary.run(lambda conn: conn.execute("SELECT 1 FROM line_hour_stats LIMIT 1").fetchone()):
+
+        def state(conn: sqlite3.Connection) -> tuple[int, bool]:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            return version, conn.execute("SELECT 1 FROM line_hour_stats LIMIT 1").fetchone() is None
+
+        version, empty = self._summary.run(state)
+        if version == SUMMARY_VERSION and not empty:
             return
 
         def aggregate_all(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -264,7 +270,15 @@ class HistoryStore:
             conn.commit()
             return conn.execute(_AGGREGATE_SQL, (self._late_from, 0)).fetchall()
 
-        self._upsert_summary(self._raw.run(aggregate_all))
+        rows = self._raw.run(aggregate_all)
+
+        def rebuild(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM line_hour_stats")
+            conn.executemany(_UPSERT_SQL, [tuple(row) for row in rows])
+            conn.execute(f"PRAGMA user_version = {SUMMARY_VERSION}")
+            conn.commit()
+
+        self._summary.run(rebuild)
 
     def _upsert_summary(self, rows: list[sqlite3.Row]) -> None:
         if not rows:
