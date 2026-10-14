@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.3] - 2026-10-14
+
+### Features
+- add project icon, logo and social preview (#21)
+
+
 ## [2026.10.2] - 2026-10-14
 
 ### Other
