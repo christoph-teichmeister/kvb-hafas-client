@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.6] - 2026-10-14
+
+### Fixes
+- ship tzdata instead of guessing the time zone (#23)
+
+
 ## [2026.10.5] - 2026-10-14
 
 ### Other
