@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.4] - 2026-10-14
+
+### Fixes
+- drop delays from vehicles tied to the wrong trip (#20)
+
+
 ## [2026.10.3] - 2026-10-14
 
 ### Features
