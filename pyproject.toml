@@ -7,6 +7,7 @@ license = "MIT"
 requires-python = ">=3.9"
 dependencies = [
     "requests>=2.31",
+    "tzdata",
 ]
 
 [dependency-groups]
