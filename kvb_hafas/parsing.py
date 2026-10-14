@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any
 
 from kvb_hafas.models import Line
+
+log = logging.getLogger(__name__)
+
+# Beyond this a delay is a parsing/data glitch, not a real delay (seen once:
+# +4599 min on a tram crossing midnight). Dropped and logged with the raw
+# HAFAS strings so the next occurrence shows the cause.
+MAX_PLAUSIBLE_DELAY_MINUTES = 360
 
 
 def _line_from_prod(prod: dict[str, Any], line_id: str, op_l: list[dict[str, Any]] | None = None) -> Line:
@@ -106,9 +115,13 @@ def _delay_minutes(planned: str, realtime: str) -> int | None:
         return days * 1440 + int(t[:2]) * 60 + int(t[2:4])
 
     try:
-        return minutes(realtime) - minutes(planned)
+        delay = minutes(realtime) - minutes(planned)
     except ValueError:
         return None
+    if abs(delay) > MAX_PLAUSIBLE_DELAY_MINUTES:
+        log.warning("implausible delay %+d min (planned=%r, realtime=%r), dropped", delay, planned, realtime)
+        return None
+    return delay
 
 
 def _seg_key(loc_l: list[dict[str, Any]], from_x: int | None, to_x: int | None) -> tuple[str, str] | None:

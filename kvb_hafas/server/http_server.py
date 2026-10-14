@@ -36,7 +36,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from kvb_hafas import KVBHafasClient, KVBHafasError
-from kvb_hafas.parsing import station_ext_id
+from kvb_hafas.parsing import _delay_minutes, station_ext_id
 from kvb_hafas.server.history_store import HistoryStore
 from kvb_hafas.server.stats import live_stats
 from kvb_hafas.webui import is_kvb_local
@@ -199,7 +199,7 @@ _route_queue: deque[tuple[str, str]] = deque()
 _last_vehicle_snapshot: list[dict] = []
 _last_vehicle_snapshot_at: float = 0.0
 
-_history: HistoryStore | None = HistoryStore(DB_FILE) if HISTORY_ENABLED else None
+_history: HistoryStore | None = HistoryStore(DB_FILE, late_from=LATE_FROM) if HISTORY_ENABLED else None
 
 
 # --------------------------------------------------------------------------
@@ -418,26 +418,8 @@ def _parse_bbox(raw: str) -> tuple[float, float, float, float]:
 
 
 # --------------------------------------------------------------------------
-# New: stop search / departures, delay computation (inlined — _delay_minutes
-# is a private helper in kvb_hafas.parsing, not part of the public API, so we
-# re-implement the same simple HHMMSS(-with-day-rollover-prefix) diff here
-# rather than depend on an unexported name across library versions).
+# Stop search / departures
 # --------------------------------------------------------------------------
-def _delay_minutes(planned: str | None, realtime: str | None) -> int | None:
-    if not planned or not realtime:
-        return None
-
-    def minutes(t: str) -> int:
-        days = int(t[:-6] or 0) if len(t) > 6 else 0
-        t = t[-6:]
-        return days * 1440 + int(t[:2]) * 60 + int(t[2:4])
-
-    try:
-        return minutes(realtime) - minutes(planned)
-    except ValueError:
-        return None
-
-
 def _stops_search(query: str, max_results: int) -> dict:
     stops = _client.find_stops(query, max_results=max_results)
     return {"stops": [asdict(s) for s in stops]}
@@ -641,7 +623,7 @@ class Handler(BaseHTTPRequestHandler):
         ts_to = self._int_or_none(query.get("to", [None])[0])
 
         def _combined() -> dict:
-            stats = _history.delay_stats(ts_from=ts_from, ts_to=ts_to, late_from=LATE_FROM)
+            stats = _history.delay_stats(ts_from=ts_from, ts_to=ts_to)
             stats["max_delay_detail"] = _history.max_delay_detail(ts_from=ts_from, ts_to=ts_to)
             return stats
 
@@ -657,7 +639,7 @@ class Handler(BaseHTTPRequestHandler):
             lambda: _stats_cached(
                 ("trend", window_seconds, bucket_seconds),
                 STATS_CACHE_TTL_SECONDS,
-                lambda: _history.punctuality_trend(window_seconds, bucket_seconds, late_from=LATE_FROM),
+                lambda: _history.punctuality_trend(window_seconds, bucket_seconds),
             )
         )
 
@@ -672,7 +654,7 @@ class Handler(BaseHTTPRequestHandler):
             lambda: _stats_cached(
                 ("hour", window_seconds, days),
                 HEATMAP_CACHE_TTL_SECONDS,
-                lambda: _history.punctuality_by_hour(window_seconds, late_from=LATE_FROM, days=days),
+                lambda: _history.punctuality_by_hour(window_seconds, days=days),
             )
         )
 

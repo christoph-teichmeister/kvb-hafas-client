@@ -86,7 +86,7 @@ def test_punctuality_trend_hourly_bucketing(store):
     assert trend["lines"]["1"][-2] == 1.0  # previous hour: on time
 
 
-def test_punctuality_trend_uses_late_from_threshold_and_reports_counts(store):
+def test_punctuality_trend_uses_late_from_threshold_and_reports_counts(store, tmp_path):
     now = int(time.time())
     hour_seconds = 3600
     # 2 min late: on time at the default threshold of 3, late at threshold 1
@@ -98,15 +98,95 @@ def test_punctuality_trend_uses_late_from_threshold_and_reports_counts(store):
     assert trend["counts"]["1"][-1] == 2
     assert trend["counts"]["1"][0] == 0
 
-    strict = store.punctuality_trend(window_seconds=24 * hour_seconds, bucket_seconds=hour_seconds, late_from=1)
-    assert strict["lines"]["1"][-1] == 0.0
+    strict = HistoryStore(tmp_path / "strict" / "history.db", late_from=1)
+    try:
+        strict.record_vehicles([_obs("t1", "1", "Str", 2), _obs("t2", "1", "Str", 3)], observed_at=now)
+        trend = strict.punctuality_trend(window_seconds=24 * hour_seconds, bucket_seconds=hour_seconds)
+        assert trend["lines"]["1"][-1] == 0.0
+        assert trend["late_from_minutes"] == 1
+    finally:
+        strict.close()
 
 
-def test_delay_stats_uses_late_from_threshold(store):
+def test_punctuality_trend_sub_hour_buckets_read_raw_samples(store):
+    now = int(time.time())
+    store.record_vehicles([_obs("t1", "1", "Str", 0), _obs("t2", "1", "Str", 4)], observed_at=now)
+    store.record_vehicles([_obs("b1", "146", "Bus", 50)], observed_at=now)  # excluded
+
+    trend = store.punctuality_trend(window_seconds=3600, bucket_seconds=300)
+    assert len(trend["buckets"]) == 12
+    assert list(trend["lines"]) == ["1"]
+    assert trend["lines"]["1"][-1] == 0.5
+    assert trend["counts"]["1"][-1] == 2
+
+
+def test_delay_stats_uses_late_from_threshold(store, tmp_path):
     store.record_vehicles([_obs("t1", "1", "Str", 2), _obs("t2", "1", "Str", 5)], observed_at=int(time.time()))
     assert store.delay_stats()["lines"][0]["punctuality_rate"] == 0.5
-    assert store.delay_stats(late_from=1)["lines"][0]["punctuality_rate"] == 0.0
     assert store.delay_stats()["late_from_minutes"] == 3
+
+    strict = HistoryStore(tmp_path / "strict" / "history.db", late_from=1)
+    try:
+        strict.record_vehicles([_obs("t1", "1", "Str", 2), _obs("t2", "1", "Str", 5)], observed_at=int(time.time()))
+        assert strict.delay_stats()["lines"][0]["punctuality_rate"] == 0.0
+    finally:
+        strict.close()
+
+
+def test_summary_accumulates_across_samples_in_one_hour(store):
+    hour = int(time.time()) // 3600 * 3600
+    store.record_vehicles([_obs("t1", "1", "Str", 1), _obs("t2", "1", "Str", 7)], observed_at=hour + 60)
+    store.record_vehicles([_obs("t1", "1", "Str", 4)], observed_at=hour + 120)
+    store.record_vehicles([_obs("t3", "1", "Str", 7, direction="Später")], observed_at=hour + 180)
+
+    stats = store.delay_stats()
+    assert stats["lines"] == [
+        {"line": "1", "observations": 4, "avg_delay_minutes": 4.75, "punctuality_rate": 0.25}
+    ]
+    detail = store.max_delay_detail()
+    # equal max: the newer sample wins
+    assert (detail["jid"], detail["direction"], detail["observed_at"]) == ("t3", "Später", hour + 180)
+
+
+def test_delay_stats_time_range_is_hour_granular(store):
+    hour = int(time.time()) // 3600 * 3600
+    store.record_vehicles([_obs("old", "1", "Str", 9)], observed_at=hour - 7200)
+    store.record_vehicles([_obs("new", "1", "Str", 1)], observed_at=hour + 10)
+
+    stats = store.delay_stats(ts_from=hour + 5)  # inside the current hour -> whole hour counts
+    assert stats["max_delay_minutes"] == 1
+    assert stats["lines"][0]["observations"] == 1
+    assert store.max_delay_detail(ts_to=hour - 1)["jid"] == "old"
+
+
+def test_summary_is_backfilled_from_raw_and_drops_implausible_delays(tmp_path):
+    """Upgrade path: an existing history.db without stats.db gets its summary
+    built on open, and the pre-cap glitch rows lose their delay."""
+    import sqlite3
+
+    db = tmp_path / "history.db"
+    s = HistoryStore(db)
+    s.record_vehicles([_obs("t1", "12", "Str", 2), _obs("t2", "12", "Str", 4599)], observed_at=int(time.time()))
+    s.close()
+    (tmp_path / "stats.db").unlink()
+
+    s = HistoryStore(db)
+    try:
+        stats = s.delay_stats()
+        assert stats["max_delay_minutes"] == 2
+        assert stats["lines"][0]["observations"] == 1
+        assert [r["delay_minutes"] for r in s.trip("t2")] == [None]
+    finally:
+        s.close()
+    rows = sqlite3.connect(str(tmp_path / "stats.db")).execute("SELECT COUNT(*) FROM line_hour_stats").fetchone()
+    assert rows == (1,)
+
+
+def test_summary_survives_purge_of_raw_samples(store):
+    store.record_vehicles([_obs("t1", "1", "Str", 5)], observed_at=int(time.time()) - 3 * 86400)
+    assert store.purge_older_than(1) == 1
+    assert store.trip("t1") == []
+    assert store.delay_stats()["lines"][0]["observations"] == 1
 
 
 def _berlin():
@@ -206,12 +286,13 @@ def test_runtime_corruption_is_quarantined_and_query_retried(tmp_path):
     s = HistoryStore(db)  # Header intakt -> Öffnen klappt noch
     try:
         assert not (tmp_path / "history.db.corrupt").exists()
-        stats = s.delay_stats()  # trifft die kaputten Seiten
-        assert stats["lines"] == []  # frische, leere DB statt Exception
+        assert s.trip("j1") == []  # trifft die kaputten Seiten: frische, leere DB statt Exception
         assert (tmp_path / "history.db.corrupt").exists()
+        # stats.db ist eine eigene Datei: die Statistik überlebt die kaputte Rohdatei
+        assert s.delay_stats()["lines"][0]["observations"] == 2000
         # Store bleibt danach voll benutzbar
         s.record_vehicles([_obs("j1", "7", "Str", 4)])
-        assert s.max_delay_detail()["line"] == "7"
+        assert [r["line"] for r in s.trip("j1")] == ["7"]
     finally:
         s.close()
 
