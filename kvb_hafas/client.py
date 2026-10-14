@@ -13,6 +13,7 @@ verwenden.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -52,11 +53,10 @@ from kvb_hafas.parsing import (
 log = logging.getLogger(__name__)
 
 ENDPOINT = "https://auskunft.kvb.koeln/gate"
-# Public HAFAS access ID, served in cleartext by the KVB widget generator at
-# https://auskunft.kvb.koeln/widgetgenerator.html. Shared by every widget user,
-# not a per-user secret - no checksum or salt required. Secret scanners may flag
-# it; that is a false positive. KVB can rotate or block it at any time.
-AID = "Rt6foY5zcTTRXMQs"
+# Public HAFAS access ID. It is not stored here: KVB's widget generator serves it
+# in cleartext in this config (`hciAuth.aid`), so it is read from there at runtime
+# and follows any rotation by KVB. Override with the env var KVB_HAFAS_AID.
+WEBAPP_CONFIG_URL = "https://auskunft.kvb.koeln/config/webapp.config.json"
 USER_AGENT = "Mozilla/5.0 (compatible; kvb-hafas-client/0.1)"
 
 # Verkehrsmittel-Bitmaske für den `jnyFltrL`-Filter von TripSearch. Die Werte
@@ -100,6 +100,14 @@ class KVBHafasClient:
         self._req_counter = 0
         self._last_call = 0.0
 
+    def _aid(self) -> str:
+        aid = os.environ.get("KVB_HAFAS_AID") or getattr(self, "_cached_aid", None)
+        if not aid:
+            resp = self.session.get(WEBAPP_CONFIG_URL, headers={"User-Agent": USER_AGENT}, timeout=self.timeout)
+            resp.raise_for_status()
+            aid = self._cached_aid = resp.json()["hciAuth"]["aid"]
+        return aid
+
     def _next_id(self) -> str:
         self._req_counter += 1
         return f"{self._req_counter}@"
@@ -114,7 +122,7 @@ class KVBHafasClient:
             "id": self._next_id(),
             "ver": "1.16",
             "lang": "deu",
-            "auth": {"type": "AID", "aid": AID},
+            "auth": {"type": "AID", "aid": self._aid()},
             "client": {"id": "HAFAS", "type": "WEB"},
             "svcReqL": [{"meth": meth, "req": req}],
         }
@@ -151,7 +159,7 @@ class KVBHafasClient:
             "id": self._next_id(),
             "ver": "1.16",
             "lang": "deu",
-            "auth": {"type": "AID", "aid": AID},
+            "auth": {"type": "AID", "aid": self._aid()},
             "client": {"id": "HAFAS", "type": "WEB"},
             "svcReqL": [{"meth": meth, "req": req} for meth, req in calls],
         }

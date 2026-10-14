@@ -52,8 +52,8 @@ Es gibt keine offizielle Doku — alles hier ist selbst getestet, Stand 2026-09-
   Rest der Batch bleibt gültig. Wer Antworten positionell zuordnet, muss die
   Länge von `svcResL` gegen die der Anfrage prüfen — sonst rutscht bei einer
   fehlenden Antwort alles um eine Position.
-- **Auth:** `{"type": "AID", "aid": "Rt6foY5zcTTRXMQs"}` — kein Checksum/Salt (`mac`-Feld) nötig. Die `aid` steht im
-  öffentlich ausgelieferten Frontend-JS.
+- **Auth:** `{"type": "AID", "aid": "<aid>"}` — kein Checksum/Salt (`mac`-Feld) nötig. Die `aid` steht im
+  öffentlich ausgelieferten Widget-Config (`config/webapp.config.json`, Feld `hciAuth.aid`); der Client liest sie zur Laufzeit von dort (Override: Env-Var `KVB_HAFAS_AID`).
 - **Koordinaten:** `{x, y}`, jeweils `* 1_000_000`; `x` = Longitude, `y` = Latitude.
 - **Linienfarben:** `prodL[].icoX` → `common.icoL[].bg`/`.fg` — HAFAS liefert die
   offiziellen Farben mit, für die Stadtbahn exakt die aus dem KVB-Netzplan (Linie 1 `#e0071c`, 15 `#5aac31`, 18
@@ -66,7 +66,7 @@ Es gibt keine offizielle Doku — alles hier ist selbst getestet, Stand 2026-09-
   "lang": "deu",
   "auth": {
     "type": "AID",
-    "aid": "Rt6foY5zcTTRXMQs"
+    "aid": "<aid>"
   },
   "client": {
     "id": "HAFAS",
