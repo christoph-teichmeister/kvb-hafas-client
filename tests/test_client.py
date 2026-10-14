@@ -1103,3 +1103,13 @@ HIMSEARCH_GEO_RESPONSE = {
         }
     ]
 }
+
+
+def test_delay_minutes_handles_day_rollover_and_drops_implausible(caplog):
+    from kvb_hafas.parsing import _delay_minutes
+
+    assert _delay_minutes("235800", "01000100") == 3
+    assert _delay_minutes("01000000", "01000200") == 2
+    with caplog.at_level("WARNING"):
+        assert _delay_minutes("235800", "04043700") is None
+    assert "04043700" in caplog.text
