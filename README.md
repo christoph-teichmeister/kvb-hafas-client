@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="kvb-hafas-client" width="250"></p>
+
 # kvb-hafas-client
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
