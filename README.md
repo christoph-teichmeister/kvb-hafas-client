@@ -6,6 +6,8 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![Tests: mocked HTTP](https://img.shields.io/badge/tests-mocked%20HTTP-brightgreen.svg)](tests/test_client.py)
 
+> **Inoffizielles Projekt, nicht verbunden mit der Kölner Verkehrs-Betriebe AG.**
+
 Inoffizieller Python-Client für die Echtzeit-Fahrplandaten der **KVB** (Kölner
 Verkehrs-Betriebe AG), Köln — Haltestellensuche, Live-Abfahrten, Verbindungen
 und Störungsmeldungen, ohne offizielle API.
@@ -23,7 +25,8 @@ stattdessen den **HAFAS**-Backend-Endpoint an, den der offizielle
 im Browser lädt:
 
 - Endpoint: `https://auskunft.kvb.koeln/gate` (HAFAS `mgate`-Protokoll)
-- Auth: `{"type": "AID", "aid": "Rt6foY5zcTTRXMQs"}` — kein Checksum/Salt nötig
+- Auth: HAFAS-`AID` aus der öffentlichen Widget-Config, vom Client zur Laufzeit gelesen
+  (Override: Env-Var `KVB_HAFAS_AID`) — kein Checksum/Salt nötig
 
 Beides steht im öffentlich ausgelieferten Frontend; keine Credentials umgangen,
 keine Authentifizierung "geknackt". Fundkette: [docs/API.md#herkunft](docs/API.md#herkunft).

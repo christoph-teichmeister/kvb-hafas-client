@@ -100,7 +100,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LocMatch
@@ -134,7 +134,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LocGeoPos
@@ -178,7 +178,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LocDetails
@@ -214,7 +214,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LocGeoReach
@@ -262,7 +262,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: StationBoard
@@ -299,7 +299,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: JourneyDetails
@@ -336,7 +336,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: JourneyMatch
@@ -376,7 +376,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: JourneyGeoPos
@@ -418,7 +418,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: JourneyCourse
@@ -463,7 +463,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: TripSearch
@@ -497,7 +497,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: Reconstruction
@@ -533,7 +533,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: SearchOnTrip
@@ -575,7 +575,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: GisRoute
@@ -633,7 +633,7 @@ paths:
                   id: "1@"
                   ver: "1.16"
                   lang: deu
-                  auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+                  auth: {type: AID, aid: '<aid>'}
                   client: {id: HAFAS, type: WEB}
                   svcReqL:
                     - meth: HimSearch
@@ -645,7 +645,7 @@ paths:
                   id: "1@"
                   ver: "1.16"
                   lang: deu
-                  auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+                  auth: {type: AID, aid: '<aid>'}
                   client: {id: HAFAS, type: WEB}
                   svcReqL:
                     - meth: HimSearch
@@ -679,7 +679,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: HimMatch
@@ -710,7 +710,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: HimGeoPos
@@ -743,7 +743,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LineMatch
@@ -788,7 +788,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LineDetails
@@ -820,7 +820,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LineSearch
@@ -855,7 +855,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: LineGeoPos
@@ -888,7 +888,7 @@ paths:
               id: "1@"
               ver: "1.16"
               lang: deu
-              auth: {type: AID, aid: Rt6foY5zcTTRXMQs}
+              auth: {type: AID, aid: '<aid>'}
               client: {id: HAFAS, type: WEB}
               svcReqL:
                 - meth: ServerInfo
@@ -952,10 +952,10 @@ components:
       description: |
         Kein Checksum/Salt nötig (manche HAFAS-Installationen verlangen
         zusätzlich ein `mac`-Feld — KVB nicht). Die `aid` ist Teil des
-        öffentlich ausgelieferten Frontend-JS, keine geheime Anmeldeinformation.
+        öffentlich ausgelieferten Widget-Config (`config/webapp.config.json`), keine geheime Anmeldeinformation.
       properties:
         type: {type: string, const: AID}
-        aid: {type: string, const: Rt6foY5zcTTRXMQs}
+        aid: {type: string, description: 'Public access ID from config/webapp.config.json (hciAuth.aid)'}
       required: [type, aid]
 
     Client:
