@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.7] - 2026-10-21
+
+### Fixes
+- bump certifi for emSign CA removal (#24)
+
+
 ## [2026.10.6] - 2026-10-14
 
 ### Fixes
