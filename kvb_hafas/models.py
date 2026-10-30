@@ -16,7 +16,7 @@ class Stop:
     ext_id: str
     lat: float | None = None
     lon: float | None = None
-    lines: tuple[str, ...] = ()  # only filled by nearby_stops(with_lines=True)
+    lines: tuple[str, ...] = ()  # only filled by stop_details() and nearby_stops(with_lines=True)
 
 
 @dataclass
@@ -63,8 +63,8 @@ class Leg:
 
 @dataclass
 class Connection:
-    dep_time: str
-    arr_time: str
+    dep_time: str  # Soll-Zeit (dTimeS) — anders als Leg.dep_time, das Echtzeit bevorzugt
+    arr_time: str  # Soll-Zeit (aTimeS)
     num_changes: int  # Anzahl Fahrt-Abschnitte - 1 (Fußwege zählen nicht)
     legs: list[Leg] = field(default_factory=list)
     ctx_recon: str = ""  # Token für reconstruct(), siehe docs/API.md#reconstruction
