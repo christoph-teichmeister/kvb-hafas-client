@@ -38,7 +38,7 @@ from urllib.parse import parse_qs, urlparse
 from kvb_hafas import KVBHafasClient, KVBHafasError
 from kvb_hafas.parsing import _delay_minutes, station_ext_id
 from kvb_hafas.server.eta import journey_eta
-from kvb_hafas.server.history_store import HistoryStore
+from kvb_hafas.server.history_store import DAY_TYPES, HistoryStore
 from kvb_hafas.server.stats import live_stats
 from kvb_hafas.webui import is_kvb_local
 
@@ -55,24 +55,32 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+    value = default
+    if raw is not None and raw != "":
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    # A too-small interval/TTL from the add-on options would hammer KVB or
+    # spin a background thread — clamp instead of trusting it.
+    return value if minimum is None else max(minimum, value)
 
 
-def _env_float(name: str, default: float | None) -> float | None:
+def _env_float(name: str, default: float | None, minimum: float | None = None) -> float | None:
     raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+    value = default
+    if raw is not None and raw != "":
+        try:
+            value = float(raw)
+        except ValueError:
+            value = default
+    if value is not None and value != value:  # NaN
+        value = default
+    if value is None or minimum is None:
+        return value
+    return max(minimum, value)
 
 
 def _env_list(name: str, default: list[str]) -> list[str]:
@@ -92,11 +100,11 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = _env_int("PORT", 8099)
 
 HISTORY_ENABLED = _env_bool("HISTORY_ENABLED", True)
-HISTORY_SAMPLE_INTERVAL_SECONDS = _env_int("HISTORY_SAMPLE_INTERVAL_SECONDS", 60)
-HISTORY_RETENTION_DAYS = _env_int("HISTORY_RETENTION_DAYS", 365)
+HISTORY_SAMPLE_INTERVAL_SECONDS = _env_int("HISTORY_SAMPLE_INTERVAL_SECONDS", 60, minimum=10)
+HISTORY_RETENTION_DAYS = _env_int("HISTORY_RETENTION_DAYS", 365, minimum=1)
 HISTORY_FILTER_LOCAL_ONLY = _env_bool("HISTORY_FILTER_LOCAL_ONLY", True)
-VEHICLE_POLL_CACHE_TTL_SECONDS = _env_float("VEHICLE_POLL_CACHE_TTL_SECONDS", 15.0)
-ALERT_CACHE_TTL_SECONDS = _env_float("ALERT_CACHE_TTL_SECONDS", 300.0)
+VEHICLE_POLL_CACHE_TTL_SECONDS = _env_float("VEHICLE_POLL_CACHE_TTL_SECONDS", 15.0, minimum=5.0)
+ALERT_CACHE_TTL_SECONDS = _env_float("ALERT_CACHE_TTL_SECONDS", 300.0, minimum=30.0)
 DEFAULT_MAP_CENTER_LAT = _env_float("DEFAULT_MAP_CENTER_LAT", 50.9375)
 DEFAULT_MAP_CENTER_LON = _env_float("DEFAULT_MAP_CENTER_LON", 6.9603)
 DEFAULT_ZOOM = _env_int("DEFAULT_ZOOM", 13)
@@ -108,7 +116,7 @@ VEHICLE_SNAPSHOT_MIN_LON = _env_float("VEHICLE_SNAPSHOT_MIN_LON", 6.75)
 VEHICLE_SNAPSHOT_MAX_LAT = _env_float("VEHICLE_SNAPSHOT_MAX_LAT", 51.05)
 VEHICLE_SNAPSHOT_MAX_LON = _env_float("VEHICLE_SNAPSHOT_MAX_LON", 7.15)
 FAVORITE_STOP_IDS = _env_list("FAVORITE_STOP_IDS", [])
-DASHBOARD_REFRESH_SECONDS = _env_int("DASHBOARD_REFRESH_SECONDS", 15)
+DASHBOARD_REFRESH_SECONDS = _env_int("DASHBOARD_REFRESH_SECONDS", 15, minimum=5)
 TILE_URL = os.environ.get("TILE_URL") or ""
 TILE_ATTRIBUTION = os.environ.get("TILE_ATTRIBUTION") or ""
 
@@ -143,6 +151,32 @@ MAX_VEHICLES = 600
 ALERT_AD_CATEGORY = 99
 LATE_FROM = 3
 PURGE_INTERVAL_SECONDS = 3600 * 6  # purge check four times a day is plenty for a daily-granularity retention
+# First purge shortly after start, so a lowered HISTORY_RETENTION_DAYS (or a
+# server that restarts more often than every 6 h) still gets purged.
+PURGE_STARTUP_DELAY_SECONDS = 60
+
+# Bounded caches: every distinct viewport bbox / stats parameter set is a key,
+# so without a cap a long-running add-on would grow these forever.
+VEHICLE_CACHE_MAX_ENTRIES = 64
+STATS_CACHE_MAX_ENTRIES = 64
+
+# Background-thread error backoff: doubles per consecutive failure, capped.
+ERROR_BACKOFF_CAP_SECONDS = 300.0
+PREFETCH_MAX_ATTEMPTS = 3
+
+# Without a browser asking for live data for this long, the snapshot poller
+# only runs as often as the history sampler needs it (or rarely, if history
+# is off) instead of every VEHICLE_POLL_CACHE_TTL_SECONDS.
+VIEWER_IDLE_SECONDS = 300.0
+IDLE_POLL_SECONDS = 600.0
+
+# Query-parameter bounds.
+MAX_STOP_SEARCH_RESULTS = 20
+MAX_DEPARTURES = 50
+TS_MIN = 0
+TS_MAX = 4102444800  # 2100-01-01; also keeps SQLite's int64 binding safe
+HISTORY_VEHICLES_DEFAULT_WINDOW_SECONDS = 3600
+HISTORY_VEHICLES_MAX_WINDOW_SECONDS = 24 * 3600
 
 # Dashboard punctuality-trend chart presets: window_seconds, bucket_seconds.
 # Server-picked (not client-supplied bucket sizes) to keep the query cheap
@@ -168,16 +202,31 @@ _client = KVBHafasClient(min_interval=1.0)
 _lock = threading.Lock()
 _cache: dict[tuple[float, ...], tuple[float, dict]] = {}
 _alerts: tuple[float, list[dict]] | None = None
-_stats_cache: dict[tuple, tuple[float, dict]] = {}
+_stats_cache: dict[tuple, tuple[float, dict, float]] = {}
 
 # Stats queries scan the history DB and the dashboard re-polls them; the
 # picture barely moves within these windows.
-STATS_CACHE_TTL_SECONDS = _env_float("STATS_CACHE_TTL_SECONDS", 60.0)
+STATS_CACHE_TTL_SECONDS = _env_float("STATS_CACHE_TTL_SECONDS", 60.0, minimum=5.0)
 # One JourneyDetails per watched trip and window — the map re-asks every 30 s
 # while an ETA panel is open, so this caps KVB traffic at that rate.
-JOURNEY_CACHE_TTL_SECONDS = _env_float("JOURNEY_CACHE_TTL_SECONDS", 30.0)
+JOURNEY_CACHE_TTL_SECONDS = _env_float("JOURNEY_CACHE_TTL_SECONDS", 30.0, minimum=10.0)
 _journeys: dict[str, tuple[float, tuple]] = {}
-HEATMAP_CACHE_TTL_SECONDS = _env_float("HEATMAP_CACHE_TTL_SECONDS", 300.0)
+HEATMAP_CACHE_TTL_SECONDS = _env_float("HEATMAP_CACHE_TTL_SECONDS", 300.0, minimum=5.0)
+
+# The history sampler only takes snapshots younger than this: with nobody
+# watching, the poller runs every max(TTL, sample interval), so allow two of
+# those before treating the snapshot as stale (KVB down, poller stuck).
+SNAPSHOT_MAX_AGE_SECONDS = 2 * max(VEHICLE_POLL_CACHE_TTL_SECONDS, HISTORY_SAMPLE_INTERVAL_SECONDS)
+
+
+def _prune_cache(cache: dict, now: float, ttl: float, max_entries: int) -> None:
+    """Drop expired entries, then the oldest ones until there is room for one
+    more. Entries are tuples whose first item is their monotonic timestamp;
+    an optional third item overrides `ttl` for that entry. Caller holds _lock."""
+    for key in [k for k, entry in cache.items() if now - entry[0] >= (entry[2] if len(entry) > 2 else ttl)]:
+        del cache[key]
+    while len(cache) >= max_entries:
+        del cache[min(cache, key=lambda k: cache[k][0])]
 
 
 def _stats_cached(key: tuple, ttl: float, produce) -> dict:
@@ -188,8 +237,11 @@ def _stats_cached(key: tuple, ttl: float, produce) -> dict:
         return hit[1]
     value = produce()
     with _lock:
-        _stats_cache[key] = (now, value)
+        _stats_cache.pop(key, None)
+        _prune_cache(_stats_cache, now, ttl, STATS_CACHE_MAX_ENTRIES)
+        _stats_cache[key] = (now, value, ttl)
     return value
+
 
 _segments: dict[tuple[str, str], list[tuple[float, float]]] = {}
 _line_paths: dict[str, dict[tuple[str, str], list[tuple[float, float]]]] = {}
@@ -197,14 +249,49 @@ _line_meta: dict[str, dict[str, str]] = {}
 _stops: dict[str, dict] = {}
 _routes_queued: set[tuple[str, str]] = set()
 _prefetch_current: list[str] = []
-_route_queue: deque[tuple[str, str]] = deque()
+# (jid, line, direction, attempts) — direction to release the _routes_queued
+# key when a route is given up on, attempts for the retry limit.
+_route_queue: deque[tuple[str, str, str, int]] = deque()
 
-# Most recent vehicle snapshot from ANY bbox poll, for the history sampler —
-# reusing already-fetched data means it never triggers its own KVB request.
+# Most recent vehicle snapshot from the background poller's city-wide bbox,
+# for /api/stats/live and the history sampler. Browser viewport polls never
+# write it — a zoomed-in map would otherwise skew the stats and history.
 _last_vehicle_snapshot: list[dict] = []
-_last_vehicle_snapshot_at: float = 0.0
+_last_vehicle_snapshot_at: float = 0.0  # wall-clock time of the KVB fetch
+_last_sampled_snapshot_at: float = 0.0
 
-_history: HistoryStore | None = HistoryStore(DB_FILE, late_from=LATE_FROM) if HISTORY_ENABLED else None
+# When a browser last asked for live data (monotonic); wakes an idle poller.
+_last_viewer_at: float = float("-inf")
+_viewer_wake = threading.Event()
+
+# Opened lazily (main() or first use), so importing this module never creates
+# or migrates a database file.
+_history: HistoryStore | None = None
+_history_init_lock = threading.Lock()
+
+
+def _get_history() -> HistoryStore | None:
+    global _history
+    if _history is not None or not HISTORY_ENABLED:
+        return _history
+    with _history_init_lock:
+        if _history is None:
+            _history = HistoryStore(DB_FILE, late_from=LATE_FROM)
+    return _history
+
+
+def _log(prefix: str, message: str, exc: BaseException | None = None) -> None:
+    detail = f" ({type(exc).__name__}: {exc})" if exc is not None else ""
+    print(f"[{prefix}] {message}{detail}", file=sys.stderr)
+
+
+def _backoff(failures: int, base: float, cap: float = ERROR_BACKOFF_CAP_SECONDS) -> float:
+    return min(cap, base * 2 ** max(0, failures - 1))
+
+
+def _pause(seconds: float) -> None:
+    """Background-thread sleep; a seam for tests."""
+    time.sleep(seconds)
 
 
 # --------------------------------------------------------------------------
@@ -228,10 +315,35 @@ def _load_geometry() -> None:
     _load_rail_geometry()
 
 
-def _load_rail_geometry() -> None:
+def _rail_geometry_sources() -> list:
+    """DATA_DIR first (local override / dev checkout), then the copy bundled
+    into the wheel as package data."""
+    sources: list = [RAIL_FILE]
     try:
-        raw = json.loads(RAIL_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        sources.append(resources.files("kvb_hafas.server").joinpath("data", "rail_geometry.json"))
+    except (ModuleNotFoundError, TypeError, OSError):  # pragma: no cover - exotic loaders
+        pass
+    return sources
+
+
+def _read_rail_geometry() -> dict | None:
+    for source in _rail_geometry_sources():
+        try:
+            raw = json.loads(source.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        except ValueError as exc:
+            _log("geometry", f"ignoring unreadable {source}", exc)
+            continue
+        if isinstance(raw, dict):
+            return raw
+    _log("geometry", "rail_geometry.json not found in DATA_DIR or package; rail lines use HAFAS polylines only")
+    return None
+
+
+def _load_rail_geometry() -> None:
+    raw = _read_rail_geometry()
+    if not raw:
         return
     paths = {key: [tuple(point) for point in path] for key, path in raw.items()}
 
@@ -266,27 +378,57 @@ def _save_geometry() -> None:
         pass
 
 
-def _prefetch_geometry() -> None:
-    while True:
+def _requeue_routes(batch: list[tuple[str, str, str, int]]) -> None:
+    """Failed batch: back to the end of the queue, unless a route has used up
+    its attempts — then release its key so a later sighting can queue it anew."""
+    with _lock:
+        for jid, line, direction, attempts in batch:
+            if attempts + 1 < PREFETCH_MAX_ATTEMPTS:
+                _route_queue.append((jid, line, direction, attempts + 1))
+            else:
+                _routes_queued.discard((line, direction))
+
+
+def _prefetch_batch() -> bool:
+    """Fetch and merge one batch of queued routes. False if the queue was
+    empty. A failed batch is requeued and the exception re-raised."""
+    with _lock:
+        batch = [_route_queue.popleft() for _ in range(min(PREFETCH_CHUNK, len(_route_queue)))]
+        _prefetch_current[:] = sorted({line for _, line, _, _ in batch if line})
+    if not batch:
+        return False
+    try:
+        results = _client.journey_details_many([jid for jid, _, _, _ in batch], chunk=PREFETCH_CHUNK)
         with _lock:
-            batch = [_route_queue.popleft() for _ in range(min(PREFETCH_CHUNK, len(_route_queue)))]
-            _prefetch_current[:] = sorted({line for _, line in batch if line})
-        if not batch:
-            time.sleep(2.0)
-            continue
-        try:
-            results = _client.journey_details_many([jid for jid, _ in batch], chunk=PREFETCH_CHUNK)
-        except (KVBHafasError, OSError):
-            continue
-        with _lock:
-            for (_, line), (segments, stops) in zip(batch, results):
+            for (_, line, _, _), (segments, stops) in zip(batch, results):
                 _merge_segments(_segments, segments)
                 _merge_segments(_line_paths.setdefault(line, {}), segments)
                 _merge_stops(stops, line)
         if any(segments for segments, _ in results):
             _save_geometry()
+    except Exception:
+        _requeue_routes(batch)
+        raise
+    finally:
         with _lock:
             _prefetch_current.clear()
+    return True
+
+
+def _prefetch_geometry() -> None:
+    failures = 0
+    while True:
+        try:
+            fetched = _prefetch_batch()
+            failures = 0
+        except Exception as exc:  # the thread must never die
+            failures += 1
+            delay = _backoff(failures, 5.0)
+            _log("prefetch", f"batch failed, retrying in {delay:.0f}s", exc)
+            _pause(delay)
+            continue
+        if not fetched:
+            _pause(2.0)
 
 
 def _merge_segments(target: dict, new: dict) -> None:
@@ -316,7 +458,7 @@ def _queue_routes(vehicles) -> None:
             key = (vehicle.line, vehicle.direction)
             if key not in _routes_queued:
                 _routes_queued.add(key)
-                _route_queue.append((vehicle.jid, vehicle.line))
+                _route_queue.append((vehicle.jid, vehicle.line, vehicle.direction, 0))
 
 
 def _network() -> dict:
@@ -354,12 +496,17 @@ def _stops_payload() -> dict:
     return {"stops": stops}
 
 
-def _vehicles(bbox: tuple[float, float, float, float]) -> dict:
+def _vehicles(bbox: tuple[float, float, float, float], snapshot: bool = False) -> dict:
+    """Vehicles in `bbox`, cached per rounded bbox. Only the background poller
+    passes snapshot=True; its city-wide result feeds stats and history."""
     global _last_vehicle_snapshot, _last_vehicle_snapshot_at
     key = tuple(round(v, 2) for v in bbox)
     with _lock:
         cached = _cache.get(key)
         if cached and time.monotonic() - cached[0] < VEHICLE_POLL_CACHE_TTL_SECONDS:
+            if snapshot:
+                _last_vehicle_snapshot = cached[1]["vehicles"]
+                _last_vehicle_snapshot_at = cached[1]["served_at"] / 1000
             return cached[1]
         segments = dict(_segments)
     vehicles = _client.vehicle_positions(*bbox, max_vehicles=MAX_VEHICLES, segments=segments)
@@ -374,25 +521,59 @@ def _vehicles(bbox: tuple[float, float, float, float]) -> dict:
         "prefetch": {"pending": pending, "queued": queued, "current": current},
         "vehicles": vehicle_dicts,
     }
+    now = time.monotonic()
     with _lock:
-        _cache[key] = (time.monotonic(), payload)
-        _last_vehicle_snapshot = vehicle_dicts
-        _last_vehicle_snapshot_at = time.time()
+        _cache.pop(key, None)
+        _prune_cache(_cache, now, VEHICLE_POLL_CACHE_TTL_SECONDS, VEHICLE_CACHE_MAX_ENTRIES)
+        _cache[key] = (now, payload)
+        if snapshot:
+            _last_vehicle_snapshot = vehicle_dicts
+            _last_vehicle_snapshot_at = payload["served_at"] / 1000
     return payload
+
+
+def _note_viewer() -> None:
+    """A browser asked for live data: keep the poller at full rate."""
+    global _last_viewer_at
+    now = time.monotonic()
+    was_idle = now - _last_viewer_at >= VIEWER_IDLE_SECONDS
+    _last_viewer_at = now
+    if was_idle:
+        _viewer_wake.set()
+
+
+def _poll_interval(now: float | None = None) -> float:
+    now = time.monotonic() if now is None else now
+    if now - _last_viewer_at < VIEWER_IDLE_SECONDS:
+        return VEHICLE_POLL_CACHE_TTL_SECONDS
+    if HISTORY_ENABLED:
+        return max(VEHICLE_POLL_CACHE_TTL_SECONDS, HISTORY_SAMPLE_INTERVAL_SECONDS)
+    return max(VEHICLE_POLL_CACHE_TTL_SECONDS, IDLE_POLL_SECONDS)
+
+
+def _wait_for_next_poll(seconds: float) -> None:
+    """Sleep until the next poll, or earlier when a browser shows up again."""
+    _viewer_wake.wait(seconds)
+    _viewer_wake.clear()
 
 
 def _vehicle_snapshot_poller() -> None:
     """Keeps _last_vehicle_snapshot fresh independent of whether a map.html
     tab is open — /api/stats/live and the history sampler both only ever
-    read that global, which used to be written solely as a side effect of a
-    browser's own /api/vehicles viewport poll."""
+    read that global. Slows down while nobody is watching."""
     bbox = (VEHICLE_SNAPSHOT_MIN_LAT, VEHICLE_SNAPSHOT_MIN_LON, VEHICLE_SNAPSHOT_MAX_LAT, VEHICLE_SNAPSHOT_MAX_LON)
+    failures = 0
     while True:
         try:
-            _vehicles(bbox)
-        except (KVBHafasError, OSError):
-            pass  # transient KVB hiccup; next tick tries again
-        time.sleep(VEHICLE_POLL_CACHE_TTL_SECONDS)
+            _vehicles(bbox, snapshot=True)
+            failures = 0
+        except Exception as exc:  # the thread must never die
+            failures += 1
+            _log("poller", "vehicle snapshot failed", exc)
+        interval = _poll_interval()
+        if failures:
+            interval = max(interval, _backoff(failures, VEHICLE_POLL_CACHE_TTL_SECONDS))
+        _wait_for_next_poll(interval)
 
 
 def _service_alerts() -> dict:
@@ -411,7 +592,10 @@ def _service_alerts() -> dict:
 
 
 def _parse_bbox(raw: str) -> tuple[float, float, float, float]:
-    parts = [float(p) for p in raw.split(",")]
+    try:
+        parts = [float(p) for p in raw.split(",")]
+    except ValueError:
+        raise ValueError("bbox needs four numbers: minLat,minLon,maxLat,maxLon") from None
     if len(parts) != 4:
         raise ValueError("bbox needs four values: minLat,minLon,maxLat,maxLon")
     min_lat, min_lon, max_lat, max_lon = parts
@@ -420,6 +604,49 @@ def _parse_bbox(raw: str) -> tuple[float, float, float, float]:
     if max_lat - min_lat > 1.0 or max_lon - min_lon > 1.0:
         raise ValueError("bbox too large (max. 1 degree per axis)")
     return min_lat, min_lon, max_lat, max_lon
+
+
+# --------------------------------------------------------------------------
+# Query-parameter parsing. Every helper raises ValueError with a short,
+# generic message (never echoing the raw input) that the handler returns as 400.
+# --------------------------------------------------------------------------
+def _param(query: dict, name: str) -> str | None:
+    values = query.get(name)
+    if not values or values[0] == "":
+        return None
+    return values[0]
+
+
+def _parse_count(query: dict, name: str, default: int, maximum: int) -> int:
+    """Positive integer, clamped to 1..maximum."""
+    raw = _param(query, name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"'{name}' must be an integer") from None
+    return max(1, min(maximum, value))
+
+
+def _parse_ts(query: dict, name: str) -> int | None:
+    """Unix timestamp in seconds within TS_MIN..TS_MAX, or None if absent."""
+    raw = _param(query, name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (ValueError, OverflowError):
+        raise ValueError(f"'{name}' must be a unix timestamp") from None
+    if not TS_MIN <= value <= TS_MAX:
+        raise ValueError(f"'{name}' out of range")
+    return value
+
+
+def _hour_floor(ts: int | None) -> int | None:
+    # The summary tables are hour-granular, so these give identical results —
+    # and keep the stats-cache key space small.
+    return None if ts is None else ts // 3600 * 3600
 
 
 # --------------------------------------------------------------------------
@@ -483,89 +710,164 @@ def _parse_point(query: dict) -> tuple[float, float]:
 # --------------------------------------------------------------------------
 # History sampling / retention — background threads.
 # --------------------------------------------------------------------------
+def _sample_once(now: float | None = None) -> int:
+    """Record the current poller snapshot once. Skips an empty, already
+    recorded or stale snapshot. Returns the number of vehicles recorded."""
+    global _last_sampled_snapshot_at
+    history = _get_history()
+    if history is None:
+        return 0
+    with _lock:
+        snapshot, taken_at = list(_last_vehicle_snapshot), _last_vehicle_snapshot_at
+    now = time.time() if now is None else now
+    if not snapshot or taken_at == _last_sampled_snapshot_at:
+        return 0
+    if now - taken_at > SNAPSHOT_MAX_AGE_SECONDS:
+        return 0  # poller has not refreshed it (KVB down?) — don't record old positions as new
+    if HISTORY_FILTER_LOCAL_ONLY:
+        snapshot = [v for v in snapshot if is_kvb_local(v.get("category"))]
+    count = history.record_vehicles(snapshot)
+    _last_sampled_snapshot_at = taken_at
+    return count
+
+
 def _history_sampler() -> None:
-    if not _history:
+    if not HISTORY_ENABLED:
         return
+    failures = 0
     while True:
-        time.sleep(HISTORY_SAMPLE_INTERVAL_SECONDS)
-        with _lock:
-            snapshot = list(_last_vehicle_snapshot)
-        if not snapshot:
-            continue  # nobody has polled /api/vehicles since the last tick — nothing to sample
-        if HISTORY_FILTER_LOCAL_ONLY:
-            snapshot = [v for v in snapshot if is_kvb_local(v.get("category"))]
+        delay = HISTORY_SAMPLE_INTERVAL_SECONDS
+        if failures:
+            delay = max(delay, _backoff(failures, HISTORY_SAMPLE_INTERVAL_SECONDS))
+        _pause(delay)
         try:
-            _history.record_vehicles(snapshot)
-        except Exception as exc:  # pragma: no cover - sampler must never crash the server
-            print(f"[history] sample failed: {exc}", file=sys.stderr)
+            _sample_once()
+            failures = 0
+        except Exception as exc:  # sampler must never crash the server
+            failures += 1
+            _log("history", "sample failed", exc)
+
+
+def _purge_once() -> int:
+    history = _get_history()
+    if history is None:
+        return 0
+    removed = history.purge_older_than(HISTORY_RETENTION_DAYS)
+    if removed:
+        print(f"[history] purged {removed} rows older than {HISTORY_RETENTION_DAYS} days")
+    return removed
 
 
 def _history_purger() -> None:
-    if not _history:
+    if not HISTORY_ENABLED:
         return
+    delay: float = PURGE_STARTUP_DELAY_SECONDS
+    failures = 0
     while True:
-        time.sleep(PURGE_INTERVAL_SECONDS)
+        _pause(delay)
         try:
-            removed = _history.purge_older_than(HISTORY_RETENTION_DAYS)
-            if removed:
-                print(f"[history] purged {removed} rows older than {HISTORY_RETENTION_DAYS} days")
-        except Exception as exc:  # pragma: no cover
-            print(f"[history] purge failed: {exc}", file=sys.stderr)
+            _purge_once()
+            failures = 0
+            delay = PURGE_INTERVAL_SECONDS
+        except Exception as exc:
+            failures += 1
+            delay = _backoff(failures, 60.0, cap=PURGE_INTERVAL_SECONDS)
+            _log("history", "purge failed", exc)
 
 
 # --------------------------------------------------------------------------
 # HTTP handler
 # --------------------------------------------------------------------------
-STATIC_FILES = {"/map.html", "/departures.html", "/dashboard.html", "/index.html"}
+HTML = "text/html; charset=utf-8"
+STATIC_FILES = {
+    "/": ("index.html", HTML),
+    "/index.html": ("index.html", HTML),
+    "/map.html": ("map.html", HTML),
+    "/departures.html": ("departures.html", HTML),
+    "/dashboard.html": ("dashboard.html", HTML),
+    "/shared.css": ("shared.css", "text/css; charset=utf-8"),
+    "/shared.js": ("shared.js", "application/javascript; charset=utf-8"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+}
+
+# path -> Handler method taking the parsed query.
+API_ROUTES = {
+    "/api/config": "_config_route",
+    "/api/vehicles": "_vehicles_route",
+    "/api/alerts": "_alerts_route",
+    "/api/network": "_network_route",
+    "/api/stops": "_stops_route",
+    "/api/stops/search": "_stops_search_route",
+    "/api/stops/details": "_stop_details_route",
+    "/api/departures": "_departures_route",
+    "/api/journey/eta": "_journey_eta_route",
+    "/api/stats/live": "_stats_live_route",
+    "/api/stats/delays": "_stats_delays_route",
+    "/api/stats/punctuality-trend": "_stats_punctuality_trend_route",
+    "/api/stats/punctuality-by-hour": "_stats_punctuality_by_hour_route",
+    "/api/history/trip": "_history_trip_route",
+    "/api/history/vehicles": "_history_vehicles_route",
+}
+
+# Live-data endpoints a browser polls; any hit keeps the snapshot poller fast.
+VIEWER_ROUTES = {"/api/vehicles", "/api/stats/live"}
+
+# 200 bodies for history endpoints while HISTORY_ENABLED is off; the
+# dashboard recognises "history disabled".
+HISTORY_DISABLED_PAYLOADS = {
+    "/api/stats/delays": lambda: {
+        "error": "history disabled",
+        "max_delay_minutes": None,
+        "max_delay_detail": None,
+        "lines": [],
+        "least_punctual_lines": [],
+    },
+    "/api/stats/punctuality-trend": lambda: {"error": "history disabled", "buckets": [], "lines": {}},
+    "/api/stats/punctuality-by-hour": lambda: {
+        "error": "history disabled",
+        "hours": list(range(24)),
+        "lines": {},
+        "counts": {},
+    },
+    "/api/history/trip": lambda: {"observations": []},
+    "/api/history/vehicles": lambda: {"observations": []},
+}
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    # Inline scripts/styles are part of the UI; map tiles come from any
+    # configurable (TILE_URL) host. No frame-ancestors: HA dashboards may
+    # embed the add-on from another origin.
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob: https: http:; connect-src 'self'; object-src 'none'; base-uri 'self'"
+    ),
+}
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Drop idle/slow connections instead of tying up a thread forever.
+    timeout = 30
+
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         path = url.path
 
-        if path in ("/", "/index.html"):
-            self._file("index.html", "text/html; charset=utf-8")
-        elif path in STATIC_FILES:
-            self._file(path.lstrip("/"), "text/html; charset=utf-8")
-        elif path.startswith("/vendor/"):
+        static = STATIC_FILES.get(path)
+        if static:
+            self._file(*static)
+            return
+        if path.startswith("/vendor/"):
             self._vendor(path[len("/vendor/") :])
-        elif path == "/shared.css":
-            self._file("shared.css", "text/css; charset=utf-8")
-        elif path == "/favicon.svg":
-            self._file("favicon.svg", "image/svg+xml")
-        elif path == "/api/config":
-            self._json(200, self._config_payload())
-        elif path == "/api/vehicles":
-            self._vehicles_route(parse_qs(url.query).get("bbox", [""])[0])
-        elif path == "/api/alerts":
-            self._guarded(_service_alerts)
-        elif path == "/api/network":
-            self._guarded(_network)
-        elif path == "/api/stops":
-            self._guarded(_stops_payload)
-        elif path == "/api/stops/search":
-            self._stops_search_route(parse_qs(url.query))
-        elif path == "/api/stops/details":
-            self._stop_details_route(parse_qs(url.query))
-        elif path == "/api/departures":
-            self._departures_route(parse_qs(url.query))
-        elif path == "/api/journey/eta":
-            self._journey_eta_route(parse_qs(url.query))
-        elif path == "/api/stats/live":
-            self._stats_live_route(parse_qs(url.query))
-        elif path == "/api/stats/delays":
-            self._stats_delays_route(parse_qs(url.query))
-        elif path == "/api/stats/punctuality-trend":
-            self._stats_punctuality_trend_route(parse_qs(url.query))
-        elif path == "/api/stats/punctuality-by-hour":
-            self._stats_punctuality_by_hour_route(parse_qs(url.query))
-        elif path == "/api/history/trip":
-            self._history_trip_route(parse_qs(url.query))
-        elif path == "/api/history/vehicles":
-            self._history_vehicles_route(parse_qs(url.query))
-        else:
+            return
+        route = API_ROUTES.get(path)
+        if route is None:
             self._json(404, {"error": "not found"})
+            return
+        if path in VIEWER_ROUTES:
+            _note_viewer()
+        getattr(self, route)(path, parse_qs(url.query))
 
     def _config_payload(self) -> dict:
         # Values the frontend needs at runtime but that live in add-on options
@@ -606,44 +908,69 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(rel)[0] or "application/octet-stream"
         self._send(200, ctype, body, cache="public, max-age=31536000, immutable")
 
-    def _vehicles_route(self, raw_bbox: str) -> None:
+    def _history_or_disabled(self, path: str) -> HistoryStore | None:
+        """The history store, or None after answering with the endpoint's
+        "history disabled" payload."""
+        history = _get_history()
+        if history is None:
+            self._json(200, HISTORY_DISABLED_PAYLOADS[path]())
+        return history
+
+    def _bad_request(self, exc: ValueError) -> None:
+        self._json(400, {"error": str(exc)})
+
+    def _config_route(self, path: str, query: dict) -> None:
+        self._json(200, self._config_payload())
+
+    def _alerts_route(self, path: str, query: dict) -> None:
+        self._guarded(_service_alerts)
+
+    def _network_route(self, path: str, query: dict) -> None:
+        self._guarded(_network)
+
+    def _stops_route(self, path: str, query: dict) -> None:
+        self._guarded(_stops_payload)
+
+    def _vehicles_route(self, path: str, query: dict) -> None:
         try:
-            bbox = _parse_bbox(raw_bbox)
+            bbox = _parse_bbox(query.get("bbox", [""])[0])
         except ValueError as exc:
-            self._json(400, {"error": str(exc)})
+            self._bad_request(exc)
             return
         self._guarded(lambda: _vehicles(bbox))
 
-    def _stops_search_route(self, query: dict) -> None:
+    def _stops_search_route(self, path: str, query: dict) -> None:
         q = (query.get("q", [""])[0]).strip()
         if not q:
             self._json(400, {"error": "missing query parameter 'q'"})
             return
         try:
-            max_results = int(query.get("max", ["5"])[0])
-        except ValueError:
-            max_results = 5
+            max_results = _parse_count(query, "max", 5, MAX_STOP_SEARCH_RESULTS)
+        except ValueError as exc:
+            self._bad_request(exc)
+            return
         self._guarded(lambda: _stops_search(q, max_results))
 
-    def _stop_details_route(self, query: dict) -> None:
+    def _stop_details_route(self, path: str, query: dict) -> None:
         ext_id = (query.get("ext_id", [""])[0]).strip()
         if not ext_id:
             self._json(400, {"error": "missing query parameter 'ext_id'"})
             return
         self._guarded(lambda: _stop_details(ext_id))
 
-    def _departures_route(self, query: dict) -> None:
+    def _departures_route(self, path: str, query: dict) -> None:
         stop_id = (query.get("stop_id", [""])[0]).strip()
         if not stop_id:
             self._json(400, {"error": "missing query parameter 'stop_id'"})
             return
         try:
-            max_journeys = int(query.get("max", ["10"])[0])
-        except ValueError:
-            max_journeys = 10
+            max_journeys = _parse_count(query, "max", 10, MAX_DEPARTURES)
+        except ValueError as exc:
+            self._bad_request(exc)
+            return
         self._guarded(lambda: _departures(stop_id, max_journeys))
 
-    def _journey_eta_route(self, query: dict) -> None:
+    def _journey_eta_route(self, path: str, query: dict) -> None:
         jid = (query.get("jid", [""])[0]).strip()
         if not jid:
             self._json(400, {"error": "missing query parameter 'jid'"})
@@ -651,42 +978,37 @@ class Handler(BaseHTTPRequestHandler):
         try:
             lat, lon = _parse_point(query)
         except ValueError as exc:
-            self._json(400, {"error": str(exc)})
+            self._bad_request(exc)
             return
         self._guarded(lambda: _journey_eta(jid, lat, lon))
 
-    def _stats_live_route(self, query: dict) -> None:
+    def _stats_live_route(self, path: str, query: dict) -> None:
         mode = (query.get("mode", [None])[0]) or None
         with _lock:
             snapshot = list(_last_vehicle_snapshot)
         self._json(200, live_stats(snapshot, late_from=LATE_FROM, mode=mode))
 
-    def _stats_delays_route(self, query: dict) -> None:
-        if not _history:
-            self._json(
-                200,
-                {
-                    "error": "history disabled",
-                    "max_delay_minutes": None,
-                    "max_delay_detail": None,
-                    "lines": [],
-                    "least_punctual_lines": [],
-                },
-            )
+    def _stats_delays_route(self, path: str, query: dict) -> None:
+        history = self._history_or_disabled(path)
+        if history is None:
             return
-        ts_from = self._int_or_none(query.get("from", [None])[0])
-        ts_to = self._int_or_none(query.get("to", [None])[0])
+        try:
+            ts_from = _hour_floor(_parse_ts(query, "from"))
+            ts_to = _hour_floor(_parse_ts(query, "to"))
+        except ValueError as exc:
+            self._bad_request(exc)
+            return
 
         def _combined() -> dict:
-            stats = _history.delay_stats(ts_from=ts_from, ts_to=ts_to)
-            stats["max_delay_detail"] = _history.max_delay_detail(ts_from=ts_from, ts_to=ts_to)
+            stats = history.delay_stats(ts_from=ts_from, ts_to=ts_to)
+            stats["max_delay_detail"] = history.max_delay_detail(ts_from=ts_from, ts_to=ts_to)
             return stats
 
         self._guarded(lambda: _stats_cached(("delays", ts_from, ts_to), STATS_CACHE_TTL_SECONDS, _combined))
 
-    def _stats_punctuality_trend_route(self, query: dict) -> None:
-        if not _history:
-            self._json(200, {"error": "history disabled", "buckets": [], "lines": {}})
+    def _stats_punctuality_trend_route(self, path: str, query: dict) -> None:
+        history = self._history_or_disabled(path)
+        if history is None:
             return
         window = (query.get("window", ["7d"])[0]) or "7d"
         window_seconds, bucket_seconds = PUNCTUALITY_WINDOWS.get(window, PUNCTUALITY_WINDOWS["7d"])
@@ -694,64 +1016,85 @@ class Handler(BaseHTTPRequestHandler):
             lambda: _stats_cached(
                 ("trend", window_seconds, bucket_seconds),
                 STATS_CACHE_TTL_SECONDS,
-                lambda: _history.punctuality_trend(window_seconds, bucket_seconds),
+                lambda: history.punctuality_trend(window_seconds, bucket_seconds),
             )
         )
 
-    def _stats_punctuality_by_hour_route(self, query: dict) -> None:
-        if not _history:
-            self._json(200, {"error": "history disabled", "hours": list(range(24)), "lines": {}, "counts": {}})
+    def _stats_punctuality_by_hour_route(self, path: str, query: dict) -> None:
+        history = self._history_or_disabled(path)
+        if history is None:
             return
         window = (query.get("window", ["28d"])[0]) or "28d"
         window_seconds = PUNCTUALITY_HOUR_WINDOWS.get(window, PUNCTUALITY_HOUR_WINDOWS["28d"])
         days = (query.get("days", ["all"])[0]) or "all"
+        if days not in DAY_TYPES:
+            self._json(400, {"error": "'days' must be one of: " + ", ".join(DAY_TYPES)})
+            return
         self._guarded(
             lambda: _stats_cached(
                 ("hour", window_seconds, days),
                 HEATMAP_CACHE_TTL_SECONDS,
-                lambda: _history.punctuality_by_hour(window_seconds, days=days),
+                lambda: history.punctuality_by_hour(window_seconds, days=days),
             )
         )
 
-    def _history_trip_route(self, query: dict) -> None:
+    def _history_trip_route(self, path: str, query: dict) -> None:
         jid = (query.get("jid", [""])[0]).strip()
         if not jid:
             self._json(400, {"error": "missing query parameter 'jid'"})
             return
-        if not _history:
-            self._json(200, {"observations": []})
+        history = self._history_or_disabled(path)
+        if history is None:
             return
-        self._guarded(lambda: {"observations": _history.trip(jid)})
+        self._guarded(lambda: {"observations": history.trip(jid)})
 
-    def _history_vehicles_route(self, query: dict) -> None:
-        if not _history:
-            self._json(200, {"observations": []})
+    def _history_vehicles_route(self, path: str, query: dict) -> None:
+        history = self._history_or_disabled(path)
+        if history is None:
             return
         line = (query.get("line", [None])[0]) or None
-        ts_from = self._int_or_none(query.get("from", [None])[0])
-        ts_to = self._int_or_none(query.get("to", [None])[0])
-        self._guarded(lambda: {"observations": _history.vehicles(line=line, ts_from=ts_from, ts_to=ts_to)})
-
-    @staticmethod
-    def _int_or_none(raw: str | None) -> int | None:
-        if raw is None or raw == "":
-            return None
         try:
-            return int(raw)
-        except ValueError:
-            return None
+            ts_from = _parse_ts(query, "from")
+            ts_to = _parse_ts(query, "to")
+        except ValueError as exc:
+            self._bad_request(exc)
+            return
+        # Default: the most recent hour (not the oldest rows in the DB).
+        if ts_to is None:
+            ts_to = int(time.time()) if ts_from is None else ts_from + HISTORY_VEHICLES_DEFAULT_WINDOW_SECONDS
+        if ts_from is None:
+            ts_from = ts_to - HISTORY_VEHICLES_DEFAULT_WINDOW_SECONDS
+        if ts_to < ts_from:
+            self._json(400, {"error": "'to' must not be before 'from'"})
+            return
+        if ts_to - ts_from > HISTORY_VEHICLES_MAX_WINDOW_SECONDS:
+            self._json(400, {"error": f"time window too large (max. {HISTORY_VEHICLES_MAX_WINDOW_SECONDS} s)"})
+            return
+        self._guarded(lambda: {"observations": history.vehicles(line=line, ts_from=ts_from, ts_to=ts_to)})
 
     def _guarded(self, produce) -> None:
+        # Error bodies stay generic: exception text can carry hosts, URLs or
+        # internals. Details go to the log.
         try:
-            self._json(200, produce())
+            body = produce()
         except (BrokenPipeError, ConnectionResetError):
             return
         except KVBHafasError as exc:
-            self._json(502, {"error": f"HAFAS: {exc}"})
+            _log("http", f"{self.path}: HAFAS error", exc)
+            self._json(502, {"error": "HAFAS request failed"})
+            return
         except OSError as exc:
-            self._json(504, {"error": f"KVB unreachable: {exc}"})
-        except Exception as exc:  # pragma: no cover - last-resort guard so a bug never surfaces a raw traceback
-            self._json(500, {"error": f"internal error: {exc}"})
+            _log("http", f"{self.path}: KVB unreachable", exc)
+            self._json(504, {"error": "KVB unreachable"})
+            return
+        except Exception as exc:  # last-resort guard so a bug never surfaces a raw traceback
+            _log("http", f"{self.path}: internal error", exc)
+            self._json(500, {"error": "internal error"})
+            return
+        try:
+            self._json(200, body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _json(self, status: int, body: dict) -> None:
         self._send(status, "application/json; charset=utf-8", json.dumps(body).encode())
@@ -760,6 +1103,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        for name, value in SECURITY_HEADERS.items():
+            self.send_header(name, value)
         if cache:
             self.send_header("Cache-Control", cache)
         self.end_headers()
@@ -771,6 +1116,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     _load_geometry()
+    # Open (and if needed migrate/backfill) the history DB before serving,
+    # not at import time.
+    _get_history()
     threading.Thread(target=_prefetch_geometry, daemon=True).start()
     threading.Thread(target=_vehicle_snapshot_poller, daemon=True).start()
     if HISTORY_ENABLED:

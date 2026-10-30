@@ -162,3 +162,13 @@ def test_threshold_boundary():
     deg = MAX_ROUTE_DISTANCE_M / 111_320
     assert journey_eta(_eastbound(), {}, (LAT + deg * 0.95, 6.905), ts("115500"))["status"] == "approaching"
     assert journey_eta(_eastbound(), {}, (LAT + deg * 1.05, 6.905), ts("115500"))["status"] == "not_on_route"
+
+
+def test_mixed_realtime_and_planned_never_puts_eta_before_departure():
+    # Ab Halt 0 mit Ist 12:05 (+5), an Halt 1 nur Soll 12:02 -> t1 < t0.
+    route = _route([_stop(0, 6.90, dep="120000", dep_rt="120500"), _stop(1, 6.91, arr="120200")])
+    eta = journey_eta(route, {}, (LAT, 6.905), now=ts("115500"))
+    assert eta["status"] == "approaching"
+    assert eta["eta"] == pytest.approx(ts("120500") * 1000)
+    [p] = passes(route, {}, (LAT, 6.905))
+    assert p.eta >= ts("120500")
