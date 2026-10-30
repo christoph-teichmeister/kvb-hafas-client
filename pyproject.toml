@@ -15,6 +15,7 @@ dev = [
     "pytest>=8.0",
     "questionary>=2.1.1",
     "rich>=15.0.0",
+    "ruff>=0.17",
 ]
 
 [build-system]
@@ -27,9 +28,28 @@ packages = ["kvb_hafas"]
 # default .py-only package scan, so list them explicitly.
 artifacts = [
     "kvb_hafas/webui/*.html",
+    "kvb_hafas/webui/*.js",
     "kvb_hafas/webui/*.css",
     "kvb_hafas/webui/*.svg",
     "kvb_hafas/webui/vendor/*.css",
     "kvb_hafas/webui/vendor/*.js",
     "kvb_hafas/webui/vendor/images/*.png",
 ]
+
+# Gleisverläufe (tools/fetch_rail_geometry.py) liegen im Repo unter data/, der
+# Server braucht sie aber auch als installiertes Paket (kvb-ha-map) — dort
+# findet er sie als Package-Data neben sich.
+[tool.hatch.build.targets.wheel.force-include]
+"data/rail_geometry.json" = "kvb_hafas/server/data/rail_geometry.json"
+
+[tool.ruff]
+target-version = "py39"
+# Der Bestand ist auf ~120 Zeichen geschrieben. E501 ist bewusst nicht aktiv
+# (siehe select) — die Zahl dient nur `ruff format`, falls jemand es lokal nutzt.
+line-length = 120
+
+[tool.ruff.lint]
+# F: echte Fehler (undefinierte Namen, ungenutzte Importe), FA: `X | Y` ohne
+# `from __future__ import annotations` bricht Python 3.9, B: Bugbear-Fallen,
+# UP: Syntax passend zu target-version.
+select = ["F", "FA", "B", "UP"]

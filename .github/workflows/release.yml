@@ -7,15 +7,38 @@ on:
 permissions:
   contents: write
 
+# Zwei Merges kurz nacheinander dürfen nicht dieselbe CalVer-Nummer berechnen.
+# Nicht abbrechen: ein halb gelaufenes Release (Tag ohne Dispatch) wäre schlimmer
+# als ein wartendes.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     if: "!contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # Spitze von main statt github.sha: ein in der concurrency-Gruppe
+          # wartender Lauf soll auf dem Release-Commit des Vorgängers aufsetzen,
+          # sonst scheitert sein Push als non-fast-forward.
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13"
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          uv sync --locked
+          uv run pytest tests/ -q
 
       - name: Compute new CalVer version
         id: version
@@ -40,9 +63,15 @@ jobs:
             range="HEAD"
           fi
 
-          feat=() fix=() docs=() other=()
+          breaking=() feat=() fix=() docs=() other=()
+          # `type!:` / `type(scope)!:` markiert einen Breaking Change (Conventional Commits).
+          breaking_re='^[a-z]+(\([^)]*\))?!: '
           while IFS= read -r subject; do
             [ -z "${subject}" ] && continue
+            if [[ "${subject}" =~ ${breaking_re} ]]; then
+              breaking+=("${subject#*: }")
+              continue
+            fi
             case "${subject}" in
               feat:*|feat\(*\):*) feat+=("${subject#*: }") ;;
               fix:*|fix\(*\):*) fix+=("${subject#*: }") ;;
@@ -54,6 +83,11 @@ jobs:
           {
             echo "## [${{ steps.version.outputs.new_version }}] - $(date -u +%Y-%m-%d)"
             echo
+            if [ "${#breaking[@]}" -gt 0 ]; then
+              echo "### Breaking Changes"
+              for l in "${breaking[@]}"; do echo "- ${l}"; done
+              echo
+            fi
             if [ "${#feat[@]}" -gt 0 ]; then
               echo "### Features"
               for l in "${feat[@]}"; do echo "- ${l}"; done
@@ -88,9 +122,6 @@ jobs:
           { head -n "${header_lines}" CHANGELOG.md; echo; cat /tmp/changelog-entry.md; tail -n +$((header_lines + 1)) CHANGELOG.md; } > /tmp/CHANGELOG.md.new
           mv /tmp/CHANGELOG.md.new CHANGELOG.md
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
       - name: Bump pyproject.toml version
         run: |
           set -euo pipefail
@@ -100,20 +131,19 @@ jobs:
           # local `uv run` rewrites it and leaves the checkout dirty.
           uv lock
 
-      - name: Commit release changes
+      # Commit und Tag in einem atomaren Push: scheitert einer (z. B. weil main
+      # inzwischen weiter ist), landet keiner — kein Tag ohne Release-Commit und
+      # kein Release-Commit, dessen Version beim nächsten Lauf erneut vergeben wird.
+      - name: Commit, tag and push release
         run: |
           set -euo pipefail
+          version="${{ steps.version.outputs.new_version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add CHANGELOG.md pyproject.toml uv.lock
-          git commit -m "chore(release): ${{ steps.version.outputs.new_version }} [skip release]"
-          git push origin HEAD:main
-
-      - name: Tag release
-        run: |
-          set -euo pipefail
-          git tag "${{ steps.version.outputs.new_version }}"
-          git push origin "${{ steps.version.outputs.new_version }}"
+          git commit -m "chore(release): ${version} [skip release]"
+          git tag "${version}"
+          git push --atomic origin HEAD:main "refs/tags/${version}"
 
       - name: Create GitHub Release
         env:
