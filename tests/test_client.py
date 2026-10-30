@@ -1154,3 +1154,26 @@ def test_eta_check_uses_wall_clock_across_midnight():
     after_midnight = datetime(2026, 10, 14, 0, 3, tzinfo=LOCAL_TZ).timestamp()
     assert _eta_matches_now("20261013", "01000500", after_midnight)
     assert not _eta_matches_now("20261013", "000500", after_midnight)  # 23:58 h earlier
+
+
+def test_journey_route_with_segments_uses_one_request():
+    client = KVBHafasClient()
+    res = deepcopy(JOURNEYDETAILS_POLYLINE_RESPONSE)
+    res["svcResL"][0]["res"]["journey"] = {
+        "jid": "jid-a",
+        "date": "20261030",
+        "dirTxt": "Ende",
+        "stopL": [
+            {"locX": 0, "idx": 0, "dTimeS": "120000"},
+            {"locX": 1, "idx": 1, "aTimeS": "121000", "aTimeR": "121200", "dTimeS": "121000"},
+            {"locX": 2, "idx": 2, "aTimeS": "122000"},
+        ],
+    }
+    with patch.object(client.session, "post", return_value=_mock_response(res)) as post:
+        route, segments = client.journey_route_with_segments("jid-a")
+
+    assert post.call_count == 1
+    assert post.call_args.kwargs["json"]["svcReqL"][0]["req"] == {"jid": "jid-a", "getPolyline": True}
+    assert [s.stop.ext_id for s in route.stops] == ["300000100", "300000200", "300000300"]
+    assert route.stops[1].arr_realtime == "121200"
+    assert sorted(segments) == [("300000100", "300000200"), ("300000200", "300000300")]

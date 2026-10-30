@@ -37,6 +37,7 @@ from urllib.parse import parse_qs, urlparse
 
 from kvb_hafas import KVBHafasClient, KVBHafasError
 from kvb_hafas.parsing import _delay_minutes, station_ext_id
+from kvb_hafas.server.eta import journey_eta
 from kvb_hafas.server.history_store import HistoryStore
 from kvb_hafas.server.stats import live_stats
 from kvb_hafas.webui import is_kvb_local
@@ -172,6 +173,10 @@ _stats_cache: dict[tuple, tuple[float, dict]] = {}
 # Stats queries scan the history DB and the dashboard re-polls them; the
 # picture barely moves within these windows.
 STATS_CACHE_TTL_SECONDS = _env_float("STATS_CACHE_TTL_SECONDS", 60.0)
+# One JourneyDetails per watched trip and window — the map re-asks every 30 s
+# while an ETA panel is open, so this caps KVB traffic at that rate.
+JOURNEY_CACHE_TTL_SECONDS = _env_float("JOURNEY_CACHE_TTL_SECONDS", 30.0)
+_journeys: dict[str, tuple[float, tuple]] = {}
 HEATMAP_CACHE_TTL_SECONDS = _env_float("HEATMAP_CACHE_TTL_SECONDS", 300.0)
 
 
@@ -440,6 +445,42 @@ def _departures(stop_id: str, max_journeys: int) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Journey ETA — "wann ist diese Bahn bei mir?"
+# --------------------------------------------------------------------------
+def _journey(jid: str) -> tuple:
+    now = time.monotonic()
+    with _lock:
+        hit = _journeys.get(jid)
+        if hit and now - hit[0] < JOURNEY_CACHE_TTL_SECONDS:
+            return hit[1]
+        for key in [k for k, (at, _) in _journeys.items() if now - at >= JOURNEY_CACHE_TTL_SECONDS]:
+            del _journeys[key]
+    value = _client.journey_route_with_segments(jid)
+    with _lock:
+        _journeys[jid] = (now, value)
+    return value
+
+
+def _journey_eta(jid: str, lat: float, lon: float) -> dict:
+    route, fetched = _journey(jid)
+    with _lock:
+        # Prefer the finer cached paths (OSM rail geometry, longest prefetch
+        # result) over this response's own polyline, like the map does.
+        segments = {**fetched, **{key: _segments[key] for key in fetched if key in _segments}}
+    return journey_eta(route, segments, (lat, lon), time.time())
+
+
+def _parse_point(query: dict) -> tuple[float, float]:
+    try:
+        lat, lon = float(query.get("lat", [""])[0]), float(query.get("lon", [""])[0])
+    except ValueError:
+        raise ValueError("lat/lon must be numbers") from None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("lat/lon implausible")
+    return lat, lon
+
+
+# --------------------------------------------------------------------------
 # History sampling / retention — background threads.
 # --------------------------------------------------------------------------
 def _history_sampler() -> None:
@@ -509,6 +550,8 @@ class Handler(BaseHTTPRequestHandler):
             self._stop_details_route(parse_qs(url.query))
         elif path == "/api/departures":
             self._departures_route(parse_qs(url.query))
+        elif path == "/api/journey/eta":
+            self._journey_eta_route(parse_qs(url.query))
         elif path == "/api/stats/live":
             self._stats_live_route(parse_qs(url.query))
         elif path == "/api/stats/delays":
@@ -599,6 +642,18 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             max_journeys = 10
         self._guarded(lambda: _departures(stop_id, max_journeys))
+
+    def _journey_eta_route(self, query: dict) -> None:
+        jid = (query.get("jid", [""])[0]).strip()
+        if not jid:
+            self._json(400, {"error": "missing query parameter 'jid'"})
+            return
+        try:
+            lat, lon = _parse_point(query)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        self._guarded(lambda: _journey_eta(jid, lat, lon))
 
     def _stats_live_route(self, query: dict) -> None:
         mode = (query.get("mode", [None])[0]) or None

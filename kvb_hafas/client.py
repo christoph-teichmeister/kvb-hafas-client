@@ -285,6 +285,18 @@ class KVBHafasClient:
         """
         return self._parse_journey_route(self._call("JourneyDetails", {"jid": jid}), jid)
 
+    def journey_route_with_segments(
+        self, jid: str
+    ) -> tuple[JourneyRoute, dict[tuple[str, str], list[tuple[float, float]]]]:
+        """Laufweg *und* Streckenverlauf je Haltestellenpaar aus einem Request.
+
+        Dieselbe `JourneyDetails`-Antwort mit `getPolyline` trägt beides —
+        wer Zeiten und Geometrie braucht (etwa für eine ETA an einem
+        beliebigen Punkt der Strecke), spart so den zweiten Roundtrip.
+        """
+        res = self._call("JourneyDetails", {"jid": jid, "getPolyline": True})
+        return self._parse_journey_route(res, jid), self._parse_segments(res)
+
     def journey_routes(self, jids: list[str], chunk: int = 10) -> list[JourneyRoute]:
         """Laufwege vieler Fahrten, gebündelt (mehrere `svcReqL`-Einträge pro POST).
 

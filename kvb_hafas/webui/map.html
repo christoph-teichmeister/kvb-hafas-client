@@ -96,13 +96,25 @@
   #prefetch .explain.show { display: block; }
   #alertlist li { margin-bottom: 8px; font-size: 12px; }
   #alertlist ul { margin: 4px 0 0; padding-left: 16px; }
+  .user-dot { width: 14px; height: 14px; border-radius: 50%; background: #06c; border: 2px solid #fff;
+              box-shadow: 0 1px 4px rgba(0,0,0,.5); box-sizing: border-box; }
+  .user-dot.manual { background: #fff; border: 4px solid #06c; }
+  .eta-btn { margin-top: 6px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+             background: var(--surface); color: var(--text-primary); font-size: 12px; cursor: pointer; }
+  .eta-btn:hover { background: var(--surface-sunken); }
+  #eta { position: static; width: 300px; max-width: calc(100vw - 40px); font-size: 12px; display: none; }
+  #eta.show { display: block; }
+  #eta .panel-head { cursor: default; }
+  #eta .eta-big { font-size: 20px; font-weight: 700; margin-top: 4px; }
+  #eta .sub { color: var(--text-secondary); margin-top: 3px; }
+  #eta .warn { color: var(--negative); margin-top: 3px; }
   .alert-pin { background: #e67e00; border: 2px solid #fff; border-radius: 50%;
                width: 14px; height: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
   @media (max-width: 640px) {
     #controls { top: auto; bottom: 10px; left: 10px; right: 10px; width: auto; max-height: 45vh; }
     #bottomright { right: 10px; bottom: auto; top: 62px; }
     .panel { padding: 8px 10px; }
-    #prefetch, #alertlist { width: min(280px, calc(100vw - 40px)); }
+    #prefetch, #alertlist, #eta { width: min(280px, calc(100vw - 40px)); }
     #status { max-width: calc(100vw - 20px); }
   }
 </style>
@@ -164,6 +176,11 @@
 </div>
 <div class="panel" id="status" role="status" aria-live="polite" aria-atomic="true">lädt …</div>
 <div id="bottomright">
+  <div class="panel" id="eta" role="status" aria-live="polite">
+    <div class="panel-head"><b id="eta-title"></b>
+      <button type="button" class="info-btn" id="eta-close" aria-label="Schließen" title="Schließen">✕</button></div>
+    <div id="eta-body"></div>
+  </div>
   <div class="panel" id="alertlist"></div>
   <div class="panel" id="prefetch">
     <div class="panel-head">
@@ -188,7 +205,7 @@ let POLL_MS = 15000;
 let ALERT_POLL_MS = 300000;
 const NETWORK_POLL_MS = 60000;   // the server's background prefetch fills the network in over time
 
-let map, networkLayer, stopLayer, vehicleLayer, alertLayer;
+let map, networkLayer, stopLayer, vehicleLayer, alertLayer, etaLayer;
 const networkLines = new Map();
 let stopMarkers = [];
 const STOP_COLOURS = { tram: '#b00', bus: '#06c', rail: '#444' };
@@ -220,6 +237,10 @@ function cssClass(category) {
   return 'rail';
 }
 
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
 function friendlyError(err) {
   if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
   return err.message || 'Unbekannter Fehler';
@@ -246,7 +267,7 @@ function icon(v) {
   const suffix = late ? ` <span class="d">+${v.delay}</span>` : '';
   const colour = lineColour(v.colour, v.category);
   const style = colour ? ` style="background:${colour};color:${v.colour === colour ? (v.text_colour || '#fff') : '#fff'}"` : '';
-  const highlighted = deepLinkJid && v.jid === deepLinkJid;
+  const highlighted = (deepLinkJid && v.jid === deepLinkJid) || (watched && watched.jid === v.jid);
   const cls = `veh veh-${cssClass(v.category)}${late ? ' late' : ''}${highlighted ? ' highlight' : ''}`;
   return L.divIcon({ className: '', iconSize: null,
     html: `<div class="${cls}"${style}>${v.line}${suffix}</div>` });
@@ -255,7 +276,8 @@ function icon(v) {
 function popup(v) {
   const delay = v.delay === null ? 'keine Echtzeitdaten'
     : v.delay > 0 ? `${v.delay} Min. verspätet` : v.delay < 0 ? `${-v.delay} Min. zu früh` : 'pünktlich';
-  return `<b>${v.line}</b> → ${v.direction}<br>nächster Halt: ${v.next_stop || '—'}<br>${delay}`;
+  return `<b>${v.line}</b> → ${v.direction}<br>nächster Halt: ${v.next_stop || '—'}<br>${delay}`
+    + `<br><button type="button" class="eta-btn" data-jid="${esc(v.jid)}">⏱ Wann ist sie bei mir?</button>`;
 }
 
 function positionAt(track, elapsed) {
@@ -645,41 +667,248 @@ function initAlertCollapse() {
   });
 }
 
-let userMarker = null, userAccuracyCircle = null;
+// --------------------------------------------------------------------------
+// Own position: browser geolocation, or set by hand (long press / right click
+// on the map, or dragging the marker) — geolocation needs HTTPS and a
+// permission the HA app or browser may not grant.
+// --------------------------------------------------------------------------
+const USER_POS_KEY = 'kvb-map-user-pos';
+const MANUAL_HINT = 'Tipp: lange auf die Karte drücken (oder Rechtsklick), um deinen Standort von Hand zu setzen.';
+let userPos = null;   // { lat, lon, accuracy, source: 'gps' | 'manual' }
+let userMarker = null, userAccuracyCircle = null, geoWatch = null;
 
+function setUserPos(pos, center) {
+  userPos = pos;
+  const ll = [pos.lat, pos.lon];
+  const manual = pos.source === 'manual';
+  const icon = L.divIcon({ className: '', iconSize: [14, 14], html: `<div class="user-dot${manual ? ' manual' : ''}"></div>` });
+  if (!userMarker) {
+    userMarker = L.marker(ll, { icon, draggable: true, keyboard: false, zIndexOffset: 1000 }).addTo(map).bindPopup('');
+    userMarker.on('dragend', () => {
+      const p = userMarker.getLatLng();
+      setManualPos(p.lat, p.lng);
+    });
+  } else {
+    userMarker.setLatLng(ll).setIcon(icon);
+  }
+  userMarker.setPopupContent(manual ? 'Dein Standort (von Hand gesetzt, verschiebbar)' : 'Dein Standort');
+  if (pos.accuracy) {
+    if (!userAccuracyCircle) {
+      userAccuracyCircle = L.circle(ll, { radius: pos.accuracy, color: '#06c', weight: 1, fillOpacity: 0.08, interactive: false }).addTo(map);
+    } else {
+      userAccuracyCircle.setLatLng(ll).setRadius(pos.accuracy);
+    }
+  } else if (userAccuracyCircle) {
+    map.removeLayer(userAccuracyCircle);
+    userAccuracyCircle = null;
+  }
+  try {
+    if (manual) localStorage.setItem(USER_POS_KEY, JSON.stringify({ lat: pos.lat, lon: pos.lon }));
+    else localStorage.removeItem(USER_POS_KEY);
+  } catch (err) { /* private mode */ }
+  if (center) map.setView(ll, Math.max(map.getZoom(), 16));
+  // Only re-ask the server once the position really moved — a GPS watch
+  // fires every few seconds with sub-metre jitter.
+  if (watched && (!watched.at || map.distance(ll, [watched.at.lat, watched.at.lon]) > 25)) refreshEta();
+}
+
+function setManualPos(lat, lon) {
+  stopGeoWatch();
+  setUserPos({ lat, lon, accuracy: null, source: 'manual' }, false);
+  status.textContent = 'Standort von Hand gesetzt — Punkt ist verschiebbar.';
+  status.classList.remove('error');
+}
+
+function restoreManualPos() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(USER_POS_KEY) || 'null');
+    if (saved && isFinite(saved.lat) && isFinite(saved.lon)) setUserPos({ ...saved, accuracy: null, source: 'manual' }, false);
+  } catch (err) { /* private mode or garbage */ }
+}
+
+function stopGeoWatch() {
+  if (geoWatch !== null) navigator.geolocation.clearWatch(geoWatch);
+  geoWatch = null;
+}
+
+function geoError(message) {
+  status.textContent = `${message} ${MANUAL_HINT}`;
+  status.title = status.textContent;
+  status.classList.add('error');
+  return message;
+}
+
+// Resolves to null on success, else to the error message (also shown in the status line).
 function locateMe() {
+  if (!window.isSecureContext) {
+    return Promise.resolve(geoError('Standortbestimmung braucht HTTPS — diese Seite ist unverschlüsselt geöffnet.'));
+  }
   if (!navigator.geolocation) {
-    status.textContent = 'Standortbestimmung wird von diesem Browser nicht unterstützt.';
-    status.classList.add('error');
-    return;
+    return Promise.resolve(geoError('Standortbestimmung wird von diesem Browser nicht unterstützt.'));
   }
   status.textContent = 'Standort wird ermittelt …';
   status.classList.remove('error');
-  navigator.geolocation.getCurrentPosition(
+  const fromCoords = (c) => ({ lat: c.latitude, lon: c.longitude, accuracy: c.accuracy, source: 'gps' });
+  return new Promise((resolve) => navigator.geolocation.getCurrentPosition(
     (pos) => {
-      const { latitude, longitude, accuracy } = pos.coords;
-      if (userMarker) map.removeLayer(userMarker);
-      if (userAccuracyCircle) map.removeLayer(userAccuracyCircle);
-      userMarker = L.circleMarker([latitude, longitude], {
-        radius: 7, weight: 2, color: '#fff', fillColor: '#06c', fillOpacity: 1,
-      }).addTo(map).bindPopup('Dein Standort').openPopup();
-      userAccuracyCircle = L.circle([latitude, longitude], {
-        radius: accuracy, color: '#06c', weight: 1, fillOpacity: 0.08,
-      }).addTo(map);
-      map.setView([latitude, longitude], Math.max(map.getZoom(), 16));
+      setUserPos(fromCoords(pos.coords), true);
       status.classList.remove('error');
+      status.textContent = `Standort gefunden (±${Math.round(pos.coords.accuracy)} m)`;
+      if (geoWatch === null) {
+        geoWatch = navigator.geolocation.watchPosition(
+          (p) => setUserPos(fromCoords(p.coords), false), () => {}, { enableHighAccuracy: true, maximumAge: 10000 });
+      }
+      resolve(null);
     },
     (err) => {
       const messages = {
-        1: 'Standortzugriff wurde verweigert.',
+        1: 'Standortzugriff wurde verweigert — Berechtigung im Browser bzw. in der App prüfen.',
         2: 'Standort konnte nicht ermittelt werden.',
         3: 'Zeitüberschreitung bei der Standortbestimmung.',
       };
-      status.textContent = messages[err.code] || 'Standort konnte nicht ermittelt werden.';
-      status.classList.add('error');
+      resolve(geoError(messages[err.code] || `Standort konnte nicht ermittelt werden (${err.message}).`));
     },
     { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
-  );
+  ));
+}
+
+// --------------------------------------------------------------------------
+// "Wann ist sie bei mir?" — ETA of one trip at the own position. The server
+// projects the position onto the trip's route and interpolates the time
+// there; this side only polls it (server-side cache: 1 KVB request per trip
+// and 30 s) and counts down in between.
+// --------------------------------------------------------------------------
+const ETA_REFRESH_MS = 30000;
+let watched = null;       // { jid, data, error, hint, skew, at, tick, refresh, line }
+
+function clock(ms) {
+  return new Date(ms).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin' });
+}
+
+function delayText(minutes, realtime) {
+  if (!realtime) return ' · laut Fahrplan';
+  return minutes > 0 ? ` (+${minutes})` : minutes < 0 ? ` (${minutes})` : '';
+}
+
+function untilText(ms) {
+  const left = (ms - (Date.now() + watched.skew)) / 1000;
+  if (left < -30) return 'schon vorbei';
+  if (left < 30) return 'jetzt';
+  if (left < 60) return 'in < 1 Min.';
+  return `in ${Math.round(left / 60)} Min.`;
+}
+
+async function watchEta(jid) {
+  map.closePopup();
+  stopEta();
+  const current = watched = { jid, data: null, error: null, hint: null, skew: 0, at: null, line: null };
+  refreshVehicleIcon(jid);
+  renderEta();
+  if (!userPos) {
+    const failed = await locateMe();
+    if (watched !== current) return;
+    if (failed) {
+      current.hint = `${failed} ${MANUAL_HINT}`;
+      renderEta();
+      return;  // setUserPos() via long press picks it up from here
+    }
+  }
+  await refreshEta();  // starts the countdown/refresh timers on its first answer
+}
+
+function stopEta() {
+  if (!watched) return;
+  clearInterval(watched.tick);
+  clearInterval(watched.refresh);
+  const jid = watched.jid;
+  watched = null;
+  etaLayer.clearLayers();
+  refreshVehicleIcon(jid);
+  renderEta();
+}
+
+function refreshVehicleIcon(jid) {
+  const entry = fleet.get(jid);
+  if (entry) entry.marker.setIcon(icon(entry.vehicle));
+}
+
+async function refreshEta() {
+  if (!watched || !userPos) return;
+  const current = watched;
+  current.at = { lat: userPos.lat, lon: userPos.lon };
+  current.hint = null;
+  try {
+    const q = `jid=${encodeURIComponent(current.jid)}&lat=${userPos.lat.toFixed(6)}&lon=${userPos.lon.toFixed(6)}`;
+    const res = await fetch(`api/journey/eta?${q}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (watched !== current) return;
+    current.data = data;
+    current.error = null;
+    current.skew = data.computed_at - Date.now();
+  } catch (err) {
+    if (watched !== current) return;
+    current.error = friendlyError(err);
+  }
+  if (!current.tick) {
+    current.tick = setInterval(renderEta, 1000);
+    current.refresh = setInterval(refreshEta, ETA_REFRESH_MS);
+  }
+  drawEta();
+  renderEta();
+}
+
+function drawEta() {
+  etaLayer.clearLayers();
+  const d = watched && watched.data;
+  watched.line = null;
+  if (!d || !d.point) return;
+  L.circleMarker(d.point, { radius: 8, weight: 3, color: '#e67e00', fillColor: '#fff', fillOpacity: 1 })
+    .bindTooltip('Hier fährt sie an dir vorbei').addTo(etaLayer);
+  watched.line = L.polyline([d.point, d.point], { color: '#e67e00', weight: 3, dashArray: '6 6', interactive: false })
+    .addTo(etaLayer);
+}
+
+function renderEta() {
+  const box = document.getElementById('eta');
+  if (!watched) { box.classList.remove('show'); return; }
+  box.classList.add('show');
+  const d = watched.data;
+  const entry = fleet.get(watched.jid);
+  const v = entry && entry.vehicle;
+  document.getElementById('eta-title').textContent =
+    `⏱ ${d ? `${d.line} → ${d.direction}` : v ? `${v.line} → ${v.direction}` : 'Fahrt'}`;
+  if (watched.line && entry && d.status === 'approaching') {
+    watched.line.setLatLngs([entry.marker.getLatLng(), d.point]);
+  } else if (watched.line) {
+    watched.line.setLatLngs([]);
+  }
+
+  let html;
+  if (watched.hint) {
+    html = `<div class="warn">${esc(watched.hint)}</div>`;
+  } else if (!d) {
+    html = watched.error ? `<div class="warn">${esc(watched.error)}</div>` : '<div class="sub">wird berechnet …</div>';
+  } else {
+    if (d.status === 'not_on_route') {
+      html = `<div class="eta-big">kommt nicht bei dir vorbei</div>
+        <div class="sub">Die Strecke ist mehr als ${d.max_route_distance_m} m von deinem Standort entfernt.</div>`;
+    } else {
+      const when = d.status === 'passed' ? 'fährt von dir weg' : untilText(d.eta);
+      html = `<div class="eta-big">${when}</div>
+        <div class="sub">${clock(d.eta)}${delayText(d.delay_minutes, d.realtime)} · ${d.distance_m} m von dir,
+          zwischen ${esc(d.between[0])} und ${esc(d.between[1])}</div>`;
+      if (d.cancelled) html += '<div class="warn">Halt auf diesem Abschnitt fällt aus.</div>';
+    }
+    const s = d.nearest_stop;
+    if (s) {
+      html += `<div class="sub">Haltestelle ${esc(s.name)} (${s.distance_m} m): ${untilText(s.eta)},
+        ${clock(s.eta)}${delayText(s.delay_minutes, s.realtime)}${s.cancelled ? ' — fällt aus' : ''}</div>`;
+    }
+    if (userPos && userPos.accuracy > 150) html += `<div class="warn">Standort ungenau (±${Math.round(userPos.accuracy)} m).</div>`;
+    if (watched.error) html += `<div class="warn">Aktualisierung fehlgeschlagen: ${esc(watched.error)}</div>`;
+  }
+  document.getElementById('eta-body').innerHTML = html;
 }
 
 const LocateControl = L.Control.extend({
@@ -691,7 +920,7 @@ const LocateControl = L.Control.extend({
     btn.setAttribute('aria-label', 'Meinen Standort anzeigen');
     btn.textContent = '📍';
     L.DomEvent.disableClickPropagation(btn);
-    L.DomEvent.on(btn, 'click', locateMe);
+    L.DomEvent.on(btn, 'click', () => { locateMe(); });
     return btn;
   },
 });
@@ -737,6 +966,7 @@ async function init() {
     spiderfyOnMaxZoom: false,
   }).addTo(map);
   alertLayer = L.layerGroup();
+  etaLayer = L.layerGroup().addTo(map);
 
   status = document.getElementById('status');
   alertList = document.getElementById('alertlist');
@@ -759,6 +989,21 @@ async function init() {
   document.getElementById('lines').addEventListener('input', savePrefs);
   map.on('moveend', () => { clearTimeout(moveTimer); moveTimer = setTimeout(schedule, 400); });
   map.on('zoomend', drawStops);
+  map.on('contextmenu', (e) => setManualPos(e.latlng.lat, e.latlng.lng));
+  // An open popup re-renders its HTML on every animation frame (the marker
+  // moves), so a press and its release rarely hit the same button node and
+  // no `click` fires — react on pointerdown instead (plus keyboard clicks).
+  // Capture phase, because Leaflet stops propagation at the popup container.
+  const etaPress = (e) => {
+    const btn = e.target.closest('.eta-btn');
+    if (!btn || (e.type === 'click' && e.detail !== 0)) return;
+    e.preventDefault();
+    watchEta(btn.dataset.jid);
+  };
+  document.getElementById('map').addEventListener('pointerdown', etaPress, true);
+  document.getElementById('map').addEventListener('click', etaPress, true);
+  document.getElementById('eta-close').addEventListener('click', stopEta);
+  restoreManualPos();
   initControlsCollapse();
   initControlsGap();
   initPrefetchInfoToggle();

@@ -93,6 +93,19 @@ Hintergrund-Thread unabhängig von offenen Karten-Tabs pollt — versorgt
 Dashboard-Live-Stats und die Verlaufs-Erfassung), …) — Defaults siehe
 `kvb_hafas/server/http_server.py`.
 
+**„Wann ist sie bei mir?“** — Fahrzeug auf der Karte antippen, im Popup den
+Button drücken: die Karte zeigt, wann diese Fahrt an deinem Standort
+vorbeikommt (Countdown, Uhrzeit, Verspätung) und wann sie an der nächsten
+Haltestelle ist. Fährt sie von dir weg oder kommt ihre Strecke nicht näher als
+300 m, steht das dort. Die Zeit wird serverseitig aus dem Laufweg interpoliert
+(`GET /api/journey/eta?jid=…&lat=…&lon=…`, `kvb_hafas/server/eta.py`), ein
+KVB-Request je Fahrt und `JOURNEY_CACHE_TTL_SECONDS` (Default 30).
+
+Der Standort kommt aus der Browser-Ortung (📍) — die braucht **HTTPS** und die
+Standortberechtigung von Browser bzw. App. Klappt das nicht: lange auf die
+Karte drücken (Desktop: Rechtsklick) setzt den Standort von Hand; der Punkt
+ist verschiebbar und wird im Browser gemerkt.
+
 Das [kvb-ha-map](https://github.com/christoph-teichmeister/kvb-ha-map) Home
 Assistant Add-on ist nur noch eine dünne Docker/Ingress-Hülle darum: es zieht
 diese Library als Dependency und startet
@@ -129,6 +142,7 @@ kvb_hafas/server/  HTTP-Server für die Web-UI (auch von kvb-ha-map importiert)
   http_server.py  Handler + main(): Vehicle-/Alert-/Netz-/Stops-/Departures-Endpunkte, Geometrie-Prefetch
   history_store.py  SQLite-Zeitreihe für Fahrzeugpositionen
   stats.py          Live- und historische Verspätungsstatistiken
+  eta.py            ETA einer Fahrt an einem beliebigen Punkt ihrer Strecke
 kvb_hafas/webui/  UI-Assets (Package-Daten)
   index.html, map.html, departures.html, dashboard.html, shared.css
   is_kvb_local.py   Bucketing-Helfer: lokale (Tram/Bus) vs. durchfahrende Linien
