@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.8] - 2026-10-30
+
+### Features
+- show when a tapped vehicle reaches your position (#25)
+
+
 ## [2026.10.7] - 2026-10-21
 
 ### Fixes
