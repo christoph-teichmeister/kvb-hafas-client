@@ -194,6 +194,7 @@
       ihr Streckenverlauf wird einmal je Linie/Richtung geladen und dann zwischengespeichert.</div>
   </div>
 </div>
+<script src="shared.js"></script>
 <script>
 // Every URL below is relative (no leading slash) so it resolves against the
 // current page URL — including HA Ingress's dynamic base path, whatever it
@@ -213,7 +214,8 @@ const STOP_ZOOM = 13;
 
 let status, alertList;
 const fleet = new Map();
-let pollTimer = null, moveTimer = null, lastPayload = null;
+let vehiclePoll = null, moveTimer = null, lastPayload = null;
+let refreshSeq = 0, refreshAbort = null;
 
 // Deep-link support: dashboard.html's max-delay tile links here with
 // ?line=<line>&jid=<jid> to pre-filter and pan/highlight one vehicle.
@@ -224,8 +226,11 @@ let deepLinkHandled = !(deepLinkLine || deepLinkJid);
 
 const CAT_COLOURS = [[/s-?bahn/, '#008d4f'], [/ice|^ic$|fern|tha|flx/, '#ec0016'], [/re|rb|regio|sev/, '#646973']];
 
+// Only validated hex colours from HAFAS are used (they end up in style
+// attributes); white or anything else falls back to the category colour.
 function lineColour(colour, category) {
-  if (colour && !/^#f{3,6}$/i.test(colour)) return colour;
+  const hex = safeColour(colour);
+  if (hex && !/^#f{3}(f{3})?$/i.test(hex)) return hex;
   const c = (category || '').toLowerCase();
   return (CAT_COLOURS.find(([re]) => re.test(c)) || [null, '#888'])[1];
 }
@@ -235,15 +240,6 @@ function cssClass(category) {
   if (c.includes('str') || c.includes('tram') || c.includes('stadtbahn')) return 'tram';
   if (c.includes('bus')) return 'bus';
   return 'rail';
-}
-
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-}
-
-function friendlyError(err) {
-  if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
-  return err.message || 'Unbekannter Fehler';
 }
 
 function filters() {
@@ -257,26 +253,39 @@ function filters() {
 
 function matches(v, f) {
   if (!f.cats.has(cssClass(v.category))) return false;
-  if (f.lines && !f.lines.includes(v.line.toLowerCase())) return false;
+  if (f.lines && !f.lines.includes(String(v.line).toLowerCase())) return false;
   if (f.onlyLate && !(v.delay >= LATE_FROM)) return false;
   return true;
 }
 
-function icon(v) {
+function iconHtml(v) {
   const late = v.delay >= LATE_FROM;
-  const suffix = late ? ` <span class="d">+${v.delay}</span>` : '';
+  const suffix = late ? ` <span class="d">+${esc(v.delay)}</span>` : '';
   const colour = lineColour(v.colour, v.category);
-  const style = colour ? ` style="background:${colour};color:${v.colour === colour ? (v.text_colour || '#fff') : '#fff'}"` : '';
+  const text = v.colour === colour ? safeColour(v.text_colour, '#fff') : '#fff';
+  const style = colour ? ` style="background:${colour};color:${text}"` : '';
   const highlighted = (deepLinkJid && v.jid === deepLinkJid) || (watched && watched.jid === v.jid);
   const cls = `veh veh-${cssClass(v.category)}${late ? ' late' : ''}${highlighted ? ' highlight' : ''}`;
-  return L.divIcon({ className: '', iconSize: null,
-    html: `<div class="${cls}"${style}>${v.line}${suffix}</div>` });
+  return `<div class="${cls}"${style}>${esc(v.line)}${suffix}</div>`;
+}
+
+function icon(v) {
+  return L.divIcon({ className: '', iconSize: null, html: iconHtml(v) });
+}
+
+// setIcon() rebuilds the marker's DOM (and, inside the cluster group, its
+// cluster bookkeeping) — only do it when the markup actually changed.
+function updateIcon(entry) {
+  const html = iconHtml(entry.vehicle);
+  if (html === entry.iconHtml) return;
+  entry.iconHtml = html;
+  entry.marker.setIcon(L.divIcon({ className: '', iconSize: null, html }));
 }
 
 function popup(v) {
-  const delay = v.delay === null ? 'keine Echtzeitdaten'
-    : v.delay > 0 ? `${v.delay} Min. verspätet` : v.delay < 0 ? `${-v.delay} Min. zu früh` : 'pünktlich';
-  return `<b>${v.line}</b> → ${v.direction}<br>nächster Halt: ${v.next_stop || '—'}<br>${delay}`
+  const delay = v.delay === null || v.delay === undefined ? 'keine Echtzeitdaten'
+    : v.delay > 0 ? `${esc(v.delay)} Min. verspätet` : v.delay < 0 ? `${esc(-v.delay)} Min. zu früh` : 'pünktlich';
+  return `<b>${esc(v.line)}</b> → ${esc(v.direction)}<br>nächster Halt: ${esc(v.next_stop || '—')}<br>${delay}`
     + `<br><button type="button" class="eta-btn" data-jid="${esc(v.jid)}">⏱ Wann ist sie bei mir?</button>`;
 }
 
@@ -294,30 +303,66 @@ function positionAt(track, elapsed) {
   return [last[1], last[2]];
 }
 
-function animate() {
-  const now = Date.now();
-  animatePrefetch(now);
+// Vehicle positions are interpolated along their track, but markers only
+// move ~1x per second and only when the step is visible (>= 1 px): inside
+// the cluster group every setLatLng() removes and re-adds the marker, i.e.
+// rebuilds its DOM (and re-opens an open popup). Off-screen markers and the
+// one whose popup is open stay put (the latter so its buttons stay usable;
+// it catches up once the popup closes). The prefetch bar keeps animating
+// per frame — it is a single cheap style update.
+const MOVE_INTERVAL_MS = 1000;
+const MIN_MOVE_PX = 1;
+let lastMoveAt = 0;
+
+function moveVehicles(now) {
+  const zoom = map.getZoom();
+  const view = map.getBounds().pad(0.25);
   for (const v of fleet.values()) {
     if (!v.shown) continue;
     const p = positionAt(v.track, now - v.servedAt);
-    if (p) v.marker.setLatLng(p);
+    if (!p) continue;
+    const cur = v.marker.getLatLng();
+    if (!view.contains(cur) && !view.contains(p)) continue;
+    if (v.marker.isPopupOpen && v.marker.isPopupOpen()) continue;
+    const a = map.project(cur, zoom), b = map.project(p, zoom);
+    if (Math.abs(a.x - b.x) < MIN_MOVE_PX && Math.abs(a.y - b.y) < MIN_MOVE_PX) continue;
+    v.marker.setLatLng(p);
+  }
+}
+
+function animate() {
+  const now = Date.now();
+  animatePrefetch(now);
+  if (now - lastMoveAt >= MOVE_INTERVAL_MS) {
+    lastMoveAt = now;
+    moveVehicles(now);
+    if (watched) renderEtaLine();
   }
   requestAnimationFrame(animate);
 }
 
+// A pan/zoom fires a new request while the old one may still be pending;
+// abort the old one and drop any answer that isn't for the latest request,
+// so a slow response for the previous bbox can't overwrite the current view.
 async function refresh() {
   const b = map.getBounds();
   const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()]
     .map(n => n.toFixed(5)).join(',');
+  const seq = ++refreshSeq;
+  if (refreshAbort) refreshAbort.abort();
+  const ctrl = refreshAbort = (typeof AbortController === 'function') ? new AbortController() : null;
   try {
-    const res = await fetch(`api/vehicles?bbox=${bbox}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    const data = await fetchJson(`api/vehicles?bbox=${bbox}`, ctrl ? { signal: ctrl.signal } : undefined);
+    if (seq !== refreshSeq) return;
+    if (!Array.isArray(data.vehicles)) throw new Error('Unerwartete Antwort vom Server');
     lastPayload = data;
     apply(data);
   } catch (err) {
+    if (seq !== refreshSeq || (err && err.name === 'AbortError')) return;
     status.textContent = `Fehler: ${friendlyError(err)}`;
     status.classList.add('error');
+  } finally {
+    if (refreshAbort === ctrl) refreshAbort = null;
   }
 }
 
@@ -325,18 +370,26 @@ function apply(data) {
   const f = filters(), seen = new Set();
   for (const v of data.vehicles) {
     seen.add(v.jid);
-    const track = v.track.length ? v.track : [[0, v.lat, v.lon]];
+    const track = Array.isArray(v.track) && v.track.length ? v.track : [[0, v.lat, v.lon]];
     let entry = fleet.get(v.jid);
     if (!entry) {
-      entry = { marker: L.marker([v.lat, v.lon], { icon: icon(v) }), track, servedAt: data.served_at, shown: false };
+      const html = iconHtml(v);
+      entry = { marker: L.marker([v.lat, v.lon], { icon: L.divIcon({ className: '', iconSize: null, html }) }),
+                iconHtml: html, track, servedAt: data.served_at, shown: false, popupHtml: null };
       fleet.set(v.jid, entry);
+      entry.vehicle = v;
     } else {
       entry.track = track;
       entry.servedAt = data.served_at;
-      entry.marker.setIcon(icon(v));
+      entry.vehicle = v;
+      updateIcon(entry);
     }
-    entry.vehicle = v;
-    entry.marker.bindPopup(popup(v));
+    // Re-binding re-renders an open popup; only touch it when the text changed.
+    const html = popup(v);
+    if (html !== entry.popupHtml) {
+      entry.popupHtml = html;
+      if (entry.marker.getPopup()) entry.marker.setPopupContent(html); else entry.marker.bindPopup(html);
+    }
     show(entry, matches(v, f));
   }
   for (const [jid, entry] of fleet) {
@@ -420,7 +473,7 @@ function render(data) {
   const geo = data.known_segments || 0;
   status.classList.remove('error');
   const drawn = networkLayer.getLayers().length;
-  const time = new Date(data.served_at).toLocaleTimeString();
+  const time = fmtBerlin(data.served_at, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   status.textContent = `${shown.length}/${data.vehicles.length} Fahrzeuge · ${late} verspätet · ${time}`;
   status.title = `${drawn} von ${geo} Streckensegmenten gezeichnet (gefiltert) · Stand ${time}`;
 }
@@ -436,42 +489,43 @@ function refilter() {
 async function refreshAlerts() {
   if (!document.getElementById('showAlerts').checked) return;
   try {
-    const res = await fetch('api/alerts');
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    const data = await fetchJson('api/alerts');
+    const alerts = Array.isArray(data.alerts) ? data.alerts : [];
     alertLayer.clearLayers();
-    for (const a of data.alerts) {
-      for (const [lat, lon] of a.points) {
+    for (const a of alerts) {
+      const stops = Array.isArray(a.stops) ? a.stops : [];
+      for (const [lat, lon] of (Array.isArray(a.points) ? a.points : [])) {
         L.marker([lat, lon], { icon: L.divIcon({ className: '', html: '<div class="alert-pin"></div>' }) })
-          .bindPopup(`<b>${a.stops.join(', ') || 'Störung'}</b><br>${a.text}`)
+          .bindPopup(`<b>${esc(stops.join(', ') || 'Störung')}</b><br>${esc(a.text)}`)
           .addTo(alertLayer);
       }
     }
-    const textOnly = data.alerts.filter(a => !a.points.length);
-    alertList.innerHTML = `<div class="panel-head" id="alert-head" role="button" tabindex="0" aria-expanded="false" aria-controls="alert-body">
-        <b>${data.alerts.length} Störungsmeldungen</b><span class="chev" aria-hidden="true">▾</span>
+    const textOnly = alerts.filter(a => !(Array.isArray(a.points) && a.points.length));
+    // Keep the user's expand/collapse choice across the periodic refresh.
+    const prevBody = document.getElementById('alert-body');
+    const expanded = !!prevBody && !prevBody.classList.contains('collapsed');
+    alertList.innerHTML = `<div class="panel-head" id="alert-head" role="button" tabindex="0" aria-expanded="${expanded}" aria-controls="alert-body">
+        <b>${alerts.length} Störungsmeldungen</b><span class="chev" aria-hidden="true">▾</span>
       </div>
-      <div id="alert-body" class="collapsed">${textOnly.length
-        ? `<ul>${textOnly.map(a => `<li>${a.text}</li>`).join('')}</ul>`
+      <div id="alert-body"${expanded ? '' : ' class="collapsed"'}>${textOnly.length
+        ? `<ul>${textOnly.map(a => `<li>${esc(a.text)}</li>`).join('')}</ul>`
         : '<div class="sub">Details auf der Karte antippen.</div>'}</div>`;
   } catch (err) {
-    alertList.innerHTML = `Störungsmeldungen: ${friendlyError(err)}`;
+    alertList.textContent = `Störungsmeldungen: ${friendlyError(err)}`;
   }
 }
 
 async function loadNetwork() {
-  const res = await fetch('api/network');
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  const data = await fetchJson('api/network');
   networkLines.clear();
-  for (const line of data.lines) {
+  for (const line of (Array.isArray(data.lines) ? data.lines : [])) {
     const colour = lineColour(line.colour, line.category);
     const polylines = line.paths.map(path => {
       const schematic = path.length < 3;
       return L.polyline(path, { color: colour, weight: schematic ? 2 : 4, opacity: 0.75,
-        dashArray: schematic ? '6 6' : null }).bindPopup(`Linie ${line.line}`);
+        dashArray: schematic ? '6 6' : null }).bindPopup(`Linie ${esc(line.line)}`);
     });
-    networkLines.set(line.line, { polylines, category: line.category });
+    networkLines.set(String(line.line), { polylines, category: line.category });
   }
 }
 
@@ -496,17 +550,16 @@ function stopCats() {
 }
 
 async function loadStops() {
-  const res = await fetch('api/stops');
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || res.statusText);
-  stopMarkers = data.stops.map(stop => {
-    const cats = new Set(stop.cats.map(cssClass));
-    const lines = stop.lines.length ? `<br>${stop.lines.join(', ')}` : '';
+  const data = await fetchJson('api/stops');
+  stopMarkers = (Array.isArray(data.stops) ? data.stops : []).map(stop => {
+    const stopLines = Array.isArray(stop.lines) ? stop.lines.map(String) : [];
+    const cats = new Set((Array.isArray(stop.cats) ? stop.cats : []).map(cssClass));
+    const lines = stopLines.length ? `<br>${esc(stopLines.join(', '))}` : '';
     return {
       cats,
-      lines: stop.lines.map(l => l.toLowerCase()),
+      lines: stopLines.map(l => l.toLowerCase()),
       marker: L.circleMarker([stop.lat, stop.lon], { radius: 4, weight: 2, color: '#fff', fillOpacity: 1 })
-        .bindPopup(`<b>${stop.name}</b>${lines}`),
+        .bindPopup(`<b>${esc(stop.name)}</b>${lines}`),
     };
   });
 }
@@ -572,9 +625,8 @@ function toggleAlerts() {
 }
 
 function schedule() {
-  clearInterval(pollTimer);
-  refresh();
-  pollTimer = setInterval(refresh, POLL_MS);
+  if (vehiclePoll) vehiclePoll.restart();
+  else { refresh(); vehiclePoll = pollWhileVisible(refresh, POLL_MS); }
 }
 
 const PREFS_KEY = 'kvb-map-filters';
@@ -657,13 +709,22 @@ function initControlsGap() {
 }
 
 function initAlertCollapse() {
-  alertList.addEventListener('click', (e) => {
-    const head = e.target.closest('#alert-head');
-    if (!head) return;
+  const toggle = (head) => {
     const body = document.getElementById('alert-body');
+    if (!body) return;
     const show = body.classList.contains('collapsed');
     body.classList.toggle('collapsed', !show);
     head.setAttribute('aria-expanded', String(show));
+  };
+  alertList.addEventListener('click', (e) => {
+    const head = e.target.closest('#alert-head');
+    if (head) toggle(head);
+  });
+  alertList.addEventListener('keydown', (e) => {
+    const head = e.target.closest('#alert-head');
+    if (!head || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    toggle(head);
   });
 }
 
@@ -819,7 +880,7 @@ async function watchEta(jid) {
 function stopEta() {
   if (!watched) return;
   clearInterval(watched.tick);
-  clearInterval(watched.refresh);
+  if (watched.refresh) watched.refresh.stop();
   const jid = watched.jid;
   watched = null;
   etaLayer.clearLayers();
@@ -829,7 +890,7 @@ function stopEta() {
 
 function refreshVehicleIcon(jid) {
   const entry = fleet.get(jid);
-  if (entry) entry.marker.setIcon(icon(entry.vehicle));
+  if (entry) updateIcon(entry);
 }
 
 async function refreshEta() {
@@ -839,20 +900,18 @@ async function refreshEta() {
   current.hint = null;
   try {
     const q = `jid=${encodeURIComponent(current.jid)}&lat=${userPos.lat.toFixed(6)}&lon=${userPos.lon.toFixed(6)}`;
-    const res = await fetch(`api/journey/eta?${q}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    const data = await fetchJson(`api/journey/eta?${q}`);
     if (watched !== current) return;
     current.data = data;
     current.error = null;
-    current.skew = data.computed_at - Date.now();
+    current.skew = Number.isFinite(data.computed_at) ? data.computed_at - Date.now() : 0;
   } catch (err) {
     if (watched !== current) return;
     current.error = friendlyError(err);
   }
   if (!current.tick) {
     current.tick = setInterval(renderEta, 1000);
-    current.refresh = setInterval(refreshEta, ETA_REFRESH_MS);
+    current.refresh = pollWhileVisible(refreshEta, ETA_REFRESH_MS);
   }
   drawEta();
   renderEta();
@@ -869,6 +928,16 @@ function drawEta() {
     .addTo(etaLayer);
 }
 
+// Dashed line from the watched vehicle to the passing point; follows the
+// marker (moved by animate()) without re-rendering the ETA panel.
+function renderEtaLine() {
+  if (!watched || !watched.line) return;
+  const d = watched.data;
+  const entry = fleet.get(watched.jid);
+  if (entry && d && d.status === 'approaching') watched.line.setLatLngs([entry.marker.getLatLng(), d.point]);
+  else watched.line.setLatLngs([]);
+}
+
 function renderEta() {
   const box = document.getElementById('eta');
   if (!watched) { box.classList.remove('show'); return; }
@@ -878,11 +947,7 @@ function renderEta() {
   const v = entry && entry.vehicle;
   document.getElementById('eta-title').textContent =
     `⏱ ${d ? `${d.line} → ${d.direction}` : v ? `${v.line} → ${v.direction}` : 'Fahrt'}`;
-  if (watched.line && entry && d.status === 'approaching') {
-    watched.line.setLatLngs([entry.marker.getLatLng(), d.point]);
-  } else if (watched.line) {
-    watched.line.setLatLngs([]);
-  }
+  renderEtaLine();
 
   let html;
   if (watched.hint) {
@@ -892,18 +957,19 @@ function renderEta() {
   } else {
     if (d.status === 'not_on_route') {
       html = `<div class="eta-big">kommt nicht bei dir vorbei</div>
-        <div class="sub">Die Strecke ist mehr als ${d.max_route_distance_m} m von deinem Standort entfernt.</div>`;
+        <div class="sub">Die Strecke ist mehr als ${esc(d.max_route_distance_m)} m von deinem Standort entfernt.</div>`;
     } else {
       const when = d.status === 'passed' ? 'fährt von dir weg' : untilText(d.eta);
-      html = `<div class="eta-big">${when}</div>
-        <div class="sub">${clock(d.eta)}${delayText(d.delay_minutes, d.realtime)} · ${d.distance_m} m von dir,
-          zwischen ${esc(d.between[0])} und ${esc(d.between[1])}</div>`;
+      const between = Array.isArray(d.between) ? d.between : [];
+      html = `<div class="eta-big">${esc(when)}</div>
+        <div class="sub">${esc(clock(d.eta))}${esc(delayText(d.delay_minutes, d.realtime))} · ${esc(d.distance_m)} m von dir,
+          zwischen ${esc(between[0])} und ${esc(between[1])}</div>`;
       if (d.cancelled) html += '<div class="warn">Halt auf diesem Abschnitt fällt aus.</div>';
     }
     const s = d.nearest_stop;
     if (s) {
-      html += `<div class="sub">Haltestelle ${esc(s.name)} (${s.distance_m} m): ${untilText(s.eta)},
-        ${clock(s.eta)}${delayText(s.delay_minutes, s.realtime)}${s.cancelled ? ' — fällt aus' : ''}</div>`;
+      html += `<div class="sub">Haltestelle ${esc(s.name)} (${esc(s.distance_m)} m): ${esc(untilText(s.eta))},
+        ${esc(clock(s.eta))}${esc(delayText(s.delay_minutes, s.realtime))}${s.cancelled ? ' — fällt aus' : ''}</div>`;
     }
     if (userPos && userPos.accuracy > 150) html += `<div class="warn">Standort ungenau (±${Math.round(userPos.accuracy)} m).</div>`;
     if (watched.error) html += `<div class="warn">Aktualisierung fehlgeschlagen: ${esc(watched.error)}</div>`;
@@ -944,8 +1010,7 @@ async function init() {
   let cfg = { default_map_center: { lat: 50.9375, lon: 6.9603 }, default_zoom: 13,
               vehicle_poll_cache_ttl_seconds: 15, alert_cache_ttl_seconds: 300 };
   try {
-    const res = await fetch('api/config');
-    if (res.ok) cfg = await res.json();
+    cfg = { ...cfg, ...(await fetchJson('api/config')) };
   } catch (err) { /* fall back to defaults above */ }
   POLL_MS = (cfg.vehicle_poll_cache_ttl_seconds || 15) * 1000;
   ALERT_POLL_MS = (cfg.alert_cache_ttl_seconds || 300) * 1000;
@@ -1020,8 +1085,8 @@ async function init() {
   toggleAlerts();
   toggleNetwork();
   toggleStops();
-  setInterval(refreshAlerts, ALERT_POLL_MS);
-  setInterval(refreshNetwork, NETWORK_POLL_MS);
+  pollWhileVisible(refreshAlerts, ALERT_POLL_MS);
+  pollWhileVisible(refreshNetwork, NETWORK_POLL_MS);
   requestAnimationFrame(animate);
 }
 

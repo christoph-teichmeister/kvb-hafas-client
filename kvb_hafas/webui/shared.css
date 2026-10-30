@@ -357,8 +357,19 @@ ul.stops li:hover { border-color: var(--accent); }
 ul.stops li .stop-label-group { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 ul.stops li .stop-label-group > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 ul.stops li .stop-distance { color: var(--text-tertiary); font-size: 11px; white-space: nowrap; flex: none; }
-ul.stops li .fav { cursor: pointer; color: var(--text-tertiary); font-size: 16px; line-height: 1; }
+ul.stops li .fav {
+  cursor: pointer; color: var(--text-tertiary); font-size: 16px; line-height: 1;
+  border: none; background: none; padding: 4px 0 4px 10px; margin: -4px 0; font-family: inherit; flex: none;
+}
+ul.stops li .fav:disabled { cursor: default; }
 ul.stops li .fav.active { color: #d69400; }
+/* Search hits are real buttons (keyboard + screen readers); the button
+   stretches over the row's padding so the whole row stays clickable. */
+ul.stops li button.stop-open {
+  flex: 1; border: none; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+  margin: -9px 0 -9px -10px; padding: 9px 0 9px 10px; border-radius: var(--radius-sm);
+}
+ul.stops li button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 .empty, .note { color: var(--text-secondary); padding: 10px 0; font-size: 13px; }
 .err { color: var(--negative); padding: 10px; background: var(--negative-tint); border-radius: var(--radius-sm); font-size: 13px; }

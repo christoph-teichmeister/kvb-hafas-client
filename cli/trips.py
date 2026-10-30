@@ -1,5 +1,8 @@
 """Verbindungssuche, Verbindungsdetails und Fußwege."""
 
+from __future__ import annotations
+
+import re
 from dataclasses import replace
 from datetime import datetime
 
@@ -13,6 +16,32 @@ from kvb_hafas import PRODUCTS, Connection, KVBHafasClient, KVBHafasError, Leg, 
 
 from cli.format import dur_min, hhmm
 from cli.ui import ask, choose, console, panel, pick_stop
+
+_TIME_INPUT = re.compile(r"(\d{1,2}):?(\d{2})")
+
+
+def parse_time_input(raw: str) -> str | None:
+    """Uhrzeit-Eingabe ("7:05", "07:05", "0705", "705") -> HAFAS-Zeit "070500".
+
+    None, wenn die Eingabe keine gültige Uhrzeit ist.
+    """
+    m = _TIME_INPUT.fullmatch(raw.strip())
+    if not m:
+        return None
+    hours, minutes = int(m.group(1)), int(m.group(2))
+    if hours > 23 or minutes > 59:
+        return None
+    return f"{hours:02d}{minutes:02d}00"
+
+
+def ask_time(default: str) -> str:
+    """So lange nach der Uhrzeit fragen, bis sie sich lesen lässt."""
+    while True:
+        raw = ask("Uhrzeit (HH:MM oder HHMM)", default)
+        parsed = parse_time_input(raw)
+        if parsed:
+            return parsed
+        console.print(f"[red]„{esc(raw)}“ ist keine gültige Uhrzeit — bitte z. B. 07:05 oder 0705 eingeben.[/]")
 
 def merge_walks(legs: list[Leg]) -> list[Leg]:
     """Aufeinanderfolgende Fußwege zu einem zusammenfassen.
@@ -156,7 +185,7 @@ def show_trip(client: KVBHafasClient) -> None:
         return
     now = datetime.now()
     date = ask("Datum (YYYYMMDD)", now.strftime("%Y%m%d"))
-    time = ask("Uhrzeit (HHMM)", now.strftime("%H%M"))
+    time = ask_time(now.strftime("%H:%M"))
     # pick_stop() gibt bei leerer Eingabe None zurück — genau das Via-Opt-out.
     via = pick_stop(client, "Via (leer = ohne)")
     products = pick_products()
@@ -168,7 +197,7 @@ def show_trip(client: KVBHafasClient) -> None:
                 start.ext_id,
                 dest.ext_id,
                 date=date,
-                time=f"{time[:4]}00",
+                time=time,
                 via_ext_id=via.ext_id if via else None,
                 products=products,
                 scroll_ctx=scroll_ctx,

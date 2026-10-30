@@ -56,8 +56,11 @@ CREATE TABLE IF NOT EXISTS vehicle_observations (
 );
 CREATE INDEX IF NOT EXISTS idx_vehicle_observations_jid ON vehicle_observations(jid, observed_at);
 CREATE INDEX IF NOT EXISTS idx_vehicle_observations_observed_at ON vehicle_observations(observed_at);
--- Replaced by the observed_at index: (line, observed_at) can't serve the
--- time-range scans the raw queries need.
+-- The observed_at index serves the plain time-range scans; this one the
+-- per-line ones (/api/history/vehicles?line=...). IF NOT EXISTS makes it the
+-- migration for existing databases too (runs on every open).
+CREATE INDEX IF NOT EXISTS idx_vehicle_observations_line_observed_at ON vehicle_observations(line, observed_at);
+-- Legacy name of an earlier per-line index.
 DROP INDEX IF EXISTS idx_vehicle_observations_line;
 """
 
@@ -129,6 +132,15 @@ _CORRUPTION_CODES = {11, 26}
 def _rate(n: int, delayed_n: int) -> float | None:
     """Share of on-time observations, rounded; None when there were none."""
     return round(1 - delayed_n / n, 4) if n else None
+
+
+def _rollback_quietly(conn: sqlite3.Connection) -> None:
+    """Roll back without masking the original error (a corrupt file may fail
+    the rollback too)."""
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        pass
 
 
 def _is_corruption(exc: sqlite3.DatabaseError) -> bool:
@@ -285,8 +297,12 @@ class HistoryStore:
             return
 
         def upsert(conn: sqlite3.Connection) -> None:
-            conn.executemany(_UPSERT_SQL, [tuple(row) for row in rows])
-            conn.commit()
+            try:
+                conn.executemany(_UPSERT_SQL, [tuple(row) for row in rows])
+                conn.commit()
+            except BaseException:
+                _rollback_quietly(conn)
+                raise
 
         self._summary.run(upsert)
 
@@ -315,18 +331,36 @@ class HistoryStore:
             for v in vehicles
         ]
 
-        def insert(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-            last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM vehicle_observations").fetchone()[0]
-            conn.executemany(
-                """INSERT INTO vehicle_observations
-                   (jid, line, category, direction, lat, lon, bearing, next_stop, delay_minutes, observed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
-            conn.commit()
-            return conn.execute(_AGGREGATE_SQL, (self._late_from, last_id)).fetchall()
+        summarised = False
 
-        self._upsert_summary(self._raw.run(insert))
+        def insert(conn: sqlite3.Connection) -> None:
+            # Raw insert and summary upsert succeed or fail together: the raw
+            # transaction stays open until the summary has committed and is
+            # rolled back if that fails, so a failed write can't leave samples
+            # the summary never counted. (Two files, so a hard crash between
+            # the two commits remains the only gap.) Lock order is always
+            # raw -> summary.
+            nonlocal summarised
+            try:
+                last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM vehicle_observations").fetchone()[0]
+                conn.executemany(
+                    """INSERT INTO vehicle_observations
+                       (jid, line, category, direction, lat, lon, bearing, next_stop, delay_minutes, observed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                aggregated = conn.execute(_AGGREGATE_SQL, (self._late_from, last_id)).fetchall()
+                # A corruption retry of this function on a fresh raw DB must
+                # not count the same samples into the summary twice.
+                if not summarised:
+                    self._upsert_summary(aggregated)
+                    summarised = True
+                conn.commit()
+            except BaseException:
+                _rollback_quietly(conn)
+                raise
+
+        self._raw.run(insert)
         return len(rows)
 
     def purge_older_than(self, retention_days: int) -> int:

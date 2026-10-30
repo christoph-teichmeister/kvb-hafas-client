@@ -3,6 +3,9 @@
 Reverse-engineerter HAFAS-Endpoint der KVB (Fahrplanauskunft, Widget-Generator).
 Es gibt keine offizielle Doku — alles hier ist selbst getestet, Stand 2026-09-16.
 
+Die Endpunkte des lokalen Kartenservers (`/api/*`, `kvb_hafas/server/`) stehen getrennt in
+[server-api.md](server-api.md).
+
 ## Inhaltsverzeichnis
 
 - [Grundlagen](#grundlagen)

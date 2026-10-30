@@ -100,3 +100,15 @@ def test_store_route_keeps_station_id():
     rows = conn.execute("SELECT ext_id, station_id FROM stop ORDER BY ext_id").fetchall()
     assert rows == [("300090301", "900000903"), ("300090302", "900000903")]
     assert conn.execute("SELECT COUNT(DISTINCT station_id) FROM stop").fetchone()[0] == 1
+
+
+def test_store_route_resave_shorter_route_leaves_no_ghost_stops():
+    """Wird eine Fahrt mit kürzerem Laufweg neu gespeichert (Kurzläufer,
+    geänderte Route), dürfen die alten hinteren Halte nicht stehen bleiben."""
+    conn = storage.connect(":memory:")
+    storage.store_route(conn, _route(times=(("082900", None), ("083500", "083400"), (None, "085600"))))
+    storage.store_route(conn, _route(times=(("082900", None), (None, "083400"))))
+
+    assert storage.counts(conn)["stop_times"] == 2
+    assert [r[0] for r in conn.execute("SELECT idx FROM stop_time ORDER BY idx")] == [0, 1]
+    assert conn.execute("SELECT stop_count FROM journey").fetchone()[0] == 2

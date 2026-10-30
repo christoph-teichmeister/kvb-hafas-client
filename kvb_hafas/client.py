@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import logging
 import os
-import time
+import threading
+import time as _time  # `time` ist in vielen Methoden ein öffentlicher Parameter
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from kvb_hafas.models import (
     Connection,
@@ -39,14 +42,19 @@ from kvb_hafas.models import (
     WalkRoute,
 )
 from kvb_hafas.parsing import (
+    LOCAL_TZ,
     _ani_track,
     _decode_polyline,
     _delay_minutes,
     _eta_matches_now,
+    _in_range,
     _line_from_prod,
     _mast_steig,
+    _prod_at,
     _prod_colours,
     _prod_name,
+    _stop_from_loc,
+    _wall_timestamp,
     station_ext_id,
 )
 
@@ -75,6 +83,32 @@ PRODUCTS = {
 ALL_PRODUCTS = sum(PRODUCTS.values())
 
 
+def _default_retry() -> Retry:
+    """Retries für die selbst angelegte Session: Verbindungsfehler und 502/503/504.
+
+    POST ist eingeschlossen — jede HAFAS-Methode hier ist eine reine Abfrage,
+    ein wiederholter Request ändert nichts. `raise_on_status=False` lässt nach
+    dem letzten Versuch die Antwort durch, damit wie bisher `raise_for_status()`
+    den HTTPError wirft.
+    """
+    return Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=frozenset({"GET", "POST"}),
+        raise_on_status=False,
+    )
+
+
+def _is_auth_error(data: dict[str, Any]) -> bool:
+    """Sieht die Antwort nach abgelehnter AID aus (HAFAS-Code `AUTH`)?
+
+    Der Code steht je nach Fehlerart im Envelope oder in den `svcResL`-Einträgen.
+    """
+    codes = [data.get("err")] + [r.get("err") for r in data.get("svcResL") or [] if isinstance(r, dict)]
+    return any("AUTH" in str(code) for code in codes if code)
+
+
 class KVBHafasClient:
     """Minimal client for the KVB HAFAS mgate endpoint.
 
@@ -93,12 +127,23 @@ class KVBHafasClient:
         """`min_interval` erzwingt einen Mindestabstand (Sekunden) zwischen zwei
         Requests. Default 0 = aus, damit interaktive Nutzung nicht ausgebremst
         wird; Batch-Jobs (siehe fetch_timetable.py) setzen es auf >= 1.0, um die
-        Rate-Limit-Zusage aus dem README einzuhalten."""
-        self.session = session or requests.Session()
+        Rate-Limit-Zusage aus dem README einzuhalten. Der Abstand gilt auch,
+        wenn mehrere Threads denselben Client benutzen.
+
+        Ohne eigene `session` bekommt die angelegte Session ein paar Retries
+        mit Backoff für Verbindungsfehler und 502/503/504. Eine übergebene
+        Session bleibt unangetastet."""
+        if session is None:
+            session = requests.Session()
+            adapter = HTTPAdapter(max_retries=_default_retry())
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+        self.session = session
         self.timeout = timeout
         self.min_interval = min_interval
         self._req_counter = 0
-        self._last_call = 0.0
+        self._last_call = float("-inf")
+        self._lock = threading.Lock()
 
     def _aid(self) -> str:
         aid = os.environ.get("KVB_HAFAS_AID") or getattr(self, "_cached_aid", None)
@@ -109,52 +154,52 @@ class KVBHafasClient:
         return aid
 
     def _next_id(self) -> str:
-        self._req_counter += 1
-        return f"{self._req_counter}@"
+        with self._lock:
+            self._req_counter += 1
+            return f"{self._req_counter}@"
 
-    def _call(self, meth: str, req: dict[str, Any]) -> dict[str, Any]:
-        if self.min_interval:
-            wait = self._last_call + self.min_interval - time.monotonic()
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.monotonic()
-        payload = {
-            "id": self._next_id(),
-            "ver": "1.16",
-            "lang": "deu",
-            "auth": {"type": "AID", "aid": self._aid()},
-            "client": {"id": "HAFAS", "type": "WEB"},
-            "svcReqL": [{"meth": meth, "req": req}],
-        }
-        resp = self.session.post(
-            ENDPOINT,
-            json=payload,
-            headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    def _throttle(self) -> None:
+        """Bis zum nächsten freien Request-Slot warten.
+
+        Der Slot wird unter dem Lock reserviert, geschlafen wird außerhalb —
+        so bekommen parallele Threads aufeinanderfolgende Slots, statt alle
+        nach derselben Pause gleichzeitig loszuschicken.
+        """
+        if not self.min_interval:
+            return
+        with self._lock:
+            slot = max(_time.monotonic(), self._last_call + self.min_interval)
+            self._last_call = slot
+        wait = slot - _time.monotonic()
+        if wait > 0:
+            _time.sleep(wait)
+
+    def _post(self, calls: list[tuple[str, dict[str, Any]]], label: str) -> list[dict[str, Any]]:
+        """Ein POST mit n `svcReqL`-Einträgen; gibt die n rohen `svcResL`-Einträge zurück.
+
+        Envelope-Fehler, kaputtes JSON und unvollständige Antworten werden zu
+        KVBHafasError. Sieht ein Fehler nach abgelaufener AID aus, wird die
+        gecachte AID verworfen und genau einmal neu versucht.
+        """
+        data = self._post_once(calls, label)
+        if _is_auth_error(data) and not os.environ.get("KVB_HAFAS_AID"):
+            log.warning("%s: HAFAS rejected the access ID, refetching it once", label)
+            self._cached_aid = None
+            data = self._post_once(calls, label)
         if data.get("err") and data["err"] != "OK":
             # Top-level envelope error (malformed request) — no svcResL entries at all.
-            raise KVBHafasError(f"{meth} failed at envelope level: {data['err']} ({data.get('errTxt', '')})")
-        svc_res = data["svcResL"][0]
-        if svc_res.get("err") != "OK":
-            raise KVBHafasError(f"{meth} failed: {svc_res.get('err')}")
-        return svc_res["res"]
+            raise KVBHafasError(f"{label} failed at envelope level: {data['err']} ({data.get('errTxt', '')})")
+        results = data.get("svcResL")
+        if not isinstance(results, list) or len(results) != len(calls):
+            # Ohne diese Prüfung würde zip() in journey_routes() stillschweigend
+            # Antworten den falschen jids zuordnen — und falsche Laufwege landen
+            # in der DB. Lieber der ganze Block kaputt als still verfälscht.
+            got = len(results) if isinstance(results, list) else 0
+            raise KVBHafasError(f"{label} returned {got} results for {len(calls)} requests")
+        return [r if isinstance(r, dict) else {} for r in results]
 
-    def _call_many(self, calls: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any] | None]:
-        """Mehrere Methoden in einem POST (`svcReqL` mit n Einträgen).
-
-        Das spart Roundtrips und — wichtiger — die `min_interval`-Pause, die
-        sonst pro Fahrt anfällt. Gibt pro Eintrag das `res` zurück, oder `None`
-        wenn dieser Teil-Request nicht `OK` war; die Reihenfolge entspricht
-        `calls`. Envelope-Fehler (der ganze POST kaputt) fliegen weiterhin.
-        """
-        if self.min_interval:
-            wait = self._last_call + self.min_interval - time.monotonic()
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.monotonic()
+    def _post_once(self, calls: list[tuple[str, dict[str, Any]]], label: str) -> dict[str, Any]:
+        self._throttle()
         payload = {
             "id": self._next_id(),
             "ver": "1.16",
@@ -170,16 +215,33 @@ class KVBHafasClient:
             timeout=self.timeout,
         )
         resp.raise_for_status()
-        data = resp.json()
-        if data.get("err") and data["err"] != "OK":
-            raise KVBHafasError(f"batch failed at envelope level: {data['err']} ({data.get('errTxt', '')})")
-        results = data.get("svcResL", [])
-        if len(results) != len(calls):
-            # Ohne diese Prüfung würde zip() in journey_routes() stillschweigend
-            # Antworten den falschen jids zuordnen — und falsche Laufwege landen
-            # in der DB. Lieber der ganze Block kaputt als still verfälscht.
-            raise KVBHafasError(f"batch returned {len(results)} results for {len(calls)} requests")
-        return [r.get("res") if r.get("err") == "OK" else None for r in results]
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            # Body bewusst nicht in die Meldung — das ist meist eine ganze HTML-Fehlerseite.
+            raise KVBHafasError(f"{label}: response is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise KVBHafasError(f"{label}: unexpected response type {type(data).__name__}")
+        return data
+
+    def _call(self, meth: str, req: dict[str, Any]) -> dict[str, Any]:
+        svc_res = self._post([(meth, req)], meth)[0]
+        if svc_res.get("err") != "OK":
+            raise KVBHafasError(f"{meth} failed: {svc_res.get('err')}")
+        res = svc_res.get("res")
+        if not isinstance(res, dict):
+            raise KVBHafasError(f"{meth} returned OK without a result")
+        return res
+
+    def _call_many(self, calls: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any] | None]:
+        """Mehrere Methoden in einem POST (`svcReqL` mit n Einträgen).
+
+        Das spart Roundtrips und — wichtiger — die `min_interval`-Pause, die
+        sonst pro Fahrt anfällt. Gibt pro Eintrag das `res` zurück, oder `None`
+        wenn dieser Teil-Request nicht `OK` war; die Reihenfolge entspricht
+        `calls`. Envelope-Fehler (der ganze POST kaputt) fliegen weiterhin.
+        """
+        return [r.get("res") if r.get("err") == "OK" else None for r in self._post(calls, "batch")]
 
     def find_stops(self, query: str, max_results: int = 5) -> list[Stop]:
         """Search for stops by (partial) name. Returns best matches first."""
@@ -193,19 +255,7 @@ class KVBHafasClient:
                 }
             },
         )
-        loc_l = res.get("match", {}).get("locL", [])
-        stops = []
-        for loc in loc_l:
-            crd = loc.get("crd")
-            stops.append(
-                Stop(
-                    name=loc.get("name", ""),
-                    ext_id=loc.get("extId", ""),
-                    lat=crd["y"] / 1_000_000 if crd else None,
-                    lon=crd["x"] / 1_000_000 if crd else None,
-                )
-            )
-        return stops
+        return [_stop_from_loc(loc) for loc in res.get("match", {}).get("locL", [])]
 
     def nearby_stops(
         self,
@@ -221,10 +271,10 @@ class KVBHafasClient:
         they carry an extId that StationBoard answers with a region-wide
         board, which is useless here.
 
-        `with_lines`: also fill Stop.lines with the line labels currently
-        serving each stop. LocGeoPos itself carries no per-stop product
-        info, so this costs one extra StationBoard request per stop and
-        only sees lines with an upcoming departure.
+        `with_lines`: also fill Stop.lines with the line labels serving
+        each stop according to the timetable (see stop_lines()). LocGeoPos
+        itself carries no per-stop product info, so this costs one extra
+        LocDetails request per stop.
         """
         res = self._call(
             "LocGeoPos",
@@ -237,23 +287,14 @@ class KVBHafasClient:
                 "getPOIs": False,
             },
         )
-        stops = []
-        for loc in res.get("locL", []):
-            crd = loc.get("crd")
-            stops.append(
-                Stop(
-                    name=loc.get("name", ""),
-                    ext_id=loc.get("extId", ""),
-                    lat=crd["y"] / 1_000_000 if crd else None,
-                    lon=crd["x"] / 1_000_000 if crd else None,
-                )
-            )
+        stops = [_stop_from_loc(loc) for loc in res.get("locL", [])]
         if with_lines:
             stops = [replace(stop, lines=self.stop_lines(stop.ext_id)) for stop in stops]
         return stops
 
     def stop_lines(self, stop_ext_id: str) -> tuple[str, ...]:
-        """Line labels serving this stop, sorted — from the timetable, not the board."""
+        """Line labels serving this stop, sorted — from the timetable (LocDetails via
+        stop_details()), not the board, so lines without an upcoming departure count too."""
         return self.stop_details(stop_ext_id).lines
 
     def journey_details(self, jid: str) -> dict[str, Any]:
@@ -323,18 +364,14 @@ class KVBHafasClient:
         s_days = (jny.get("sDaysL") or [{}])[0]
 
         stops = []
-        for st in jny.get("stopL", []):
-            loc = loc_l[st["locX"]] if st.get("locX") is not None and st["locX"] < len(loc_l) else {}
-            crd = loc.get("crd", {})
+        for pos, st in enumerate(jny.get("stopL", [])):
+            loc = loc_l[st["locX"]] if _in_range(loc_l, st.get("locX")) else {}
             stops.append(
                 JourneyStop(
-                    idx=st.get("idx", 0),
-                    stop=Stop(
-                        name=loc.get("name", ""),
-                        ext_id=loc.get("extId", ""),
-                        lat=crd.get("y", 0) / 1_000_000 if crd.get("y") is not None else None,
-                        lon=crd.get("x", 0) / 1_000_000 if crd.get("x") is not None else None,
-                    ),
+                    # Ohne `idx` die Position im Laufweg — eine feste 0 würde in
+                    # storage.store_route() alle Halte auf denselben Schlüssel legen.
+                    idx=st.get("idx", pos),
+                    stop=_stop_from_loc(loc),
                     arr_planned=st.get("aTimeS"),
                     dep_planned=st.get("dTimeS"),
                     arr_realtime=st.get("aTimeR"),
@@ -346,7 +383,7 @@ class KVBHafasClient:
 
         return JourneyRoute(
             jid=jny.get("jid", jid),
-            line=prod_l[prod_idx].get("name", "") if prod_idx is not None and prod_idx < len(prod_l) else "",
+            line=_prod_name(_prod_at(prod_l, prod_idx)),
             direction=jny.get("dirTxt", ""),
             date=jny.get("date", ""),
             service_days=s_days.get("sDaysI", ""),
@@ -389,18 +426,26 @@ class KVBHafasClient:
         res = self._call("StationBoard", req)
         prod_l = res.get("common", {}).get("prodL", [])
         loc_l = res.get("common", {}).get("locL", [])
+        # Auf der ARR-Tafel zählen die a*-Felder, auf der DEP-Tafel die d*-Felder.
+        # Trägt ein Halt das bevorzugte Präfix nicht (Start-/Endhalt), gilt das andere.
+        prefer, other = ("a", "d") if board_type == "ARR" else ("d", "a")
         departures = []
         for jny in res.get("jnyL", []):
             stb = jny.get("stbStop", {})
-            prod_idx = jny.get("prodX")
-            line = prod_l[prod_idx]["name"] if prod_idx is not None and prod_idx < len(prod_l) else "?"
+            # Soll- und Ist-Zeit immer aus demselben Präfix, sonst stünde neben
+            # der Soll-Ankunft womöglich die Ist-Abfahrt.
+            p = prefer if stb.get(f"{prefer}TimeS") else other
+            platform = (
+                stb.get(f"{prefer}PlatfR") or stb.get(f"{prefer}PlatfS")
+                or stb.get(f"{other}PlatfR") or stb.get(f"{other}PlatfS")
+            )
             departures.append(
                 Departure(
-                    line=line,
+                    line=_prod_name(_prod_at(prod_l, jny.get("prodX"))) or "?",
                     direction=jny.get("dirTxt", ""),
-                    planned=stb.get("dTimeS") or stb.get("aTimeS", ""),
-                    realtime=stb.get("dTimeR") or stb.get("aTimeR"),
-                    platform=stb.get("dPlatfR") or stb.get("dPlatfS") or _mast_steig(loc_l, stb.get("locX")),
+                    planned=stb.get(f"{p}TimeS", ""),
+                    realtime=stb.get(f"{p}TimeR"),
+                    platform=platform or _mast_steig(loc_l, stb.get("locX")),
                     cancelled=bool(jny.get("isCncl", False)),
                     jid=jny.get("jid", ""),
                 )
@@ -617,7 +662,7 @@ class KVBHafasClient:
         prod_l = common.get("prodL", [])
 
         def loc_name(idx: int | None) -> str:
-            return loc_l[idx].get("name", "") if idx is not None and idx < len(loc_l) else ""
+            return loc_l[idx].get("name", "") if _in_range(loc_l, idx) else ""
 
         connections = []
         for con in res.get("outConL", []):
@@ -625,7 +670,6 @@ class KVBHafasClient:
             for sec in con.get("secL", []):
                 dep, arr = sec.get("dep", {}), sec.get("arr", {})
                 jny = sec.get("jny")
-                prod_idx = (jny or {}).get("prodX")
                 legs.append(
                     Leg(
                         walk=jny is None,
@@ -633,7 +677,7 @@ class KVBHafasClient:
                         to_name=loc_name(arr.get("locX")),
                         dep_time=dep.get("dTimeR") or dep.get("dTimeS", ""),
                         arr_time=arr.get("aTimeR") or arr.get("aTimeS", ""),
-                        line=prod_l[prod_idx].get("name") if prod_idx is not None and prod_idx < len(prod_l) else None,
+                        line=None if jny is None else (_prod_name(_prod_at(prod_l, jny.get("prodX"))) or None),
                         direction=(jny or {}).get("dirTxt"),
                         dep_platform=dep.get("dPlatfR") or dep.get("dPlatfS"),
                         arr_platform=arr.get("aPlatfR") or arr.get("aPlatfS"),
@@ -653,6 +697,7 @@ class KVBHafasClient:
             fare = fares[ref.get("fareX", 0)] if ref.get("fareX", 0) < len(fares) else {}
             connections.append(
                 Connection(
+                    # Soll-Zeiten der Verbindung; Leg.dep_time/arr_time bevorzugen Echtzeit.
                     dep_time=con.get("dep", {}).get("dTimeS", ""),
                     arr_time=con.get("arr", {}).get("aTimeS", ""),
                     num_changes=max(rides - 1, 0),
@@ -684,8 +729,10 @@ class KVBHafasClient:
     def stop_details(self, stop_ext_id: str) -> Stop:
         """Haltestellen-Detail inkl. aller bedienenden Linien (LocDetails).
 
-        Anders als stop_lines() über die Abfahrtstafel sind das die Linien
-        laut Fahrplan, unabhängig davon, ob gerade eine Fahrt ansteht.
+        Die Linien kommen aus dem Fahrplan, nicht von der Abfahrtstafel — sie
+        zählen also auch, wenn gerade keine Fahrt ansteht. stop_lines() ist
+        die Kurzform für nur die Linien. Nachtlinien fehlen hier allerdings,
+        siehe lines_in_area().
         """
         res = self._call("LocDetails", {"locL": [{"type": "S", "lid": f"A=1@L={stop_ext_id}@"}]})
         loc_l = res.get("locL", [])
@@ -693,15 +740,8 @@ class KVBHafasClient:
             raise KVBHafasError(f"LocDetails returned no location for {stop_ext_id}")
         loc = loc_l[0]
         prod_l = res.get("common", {}).get("prodL", [])
-        lines = [prod_l[i].get("name", "") for i in loc.get("pRefL", []) if i < len(prod_l)]
-        crd = loc.get("crd")
-        return Stop(
-            name=loc.get("name", ""),
-            ext_id=loc.get("extId", ""),
-            lat=crd["y"] / 1_000_000 if crd else None,
-            lon=crd["x"] / 1_000_000 if crd else None,
-            lines=tuple(sorted(set(lines) - {""}, key=lambda name: (len(name), name))),
-        )
+        lines = [_prod_name(prod_l[i]) for i in loc.get("pRefL", []) if _in_range(prod_l, i)]
+        return _stop_from_loc(loc, lines=tuple(sorted(set(lines) - {""}, key=lambda name: (len(name), name))))
 
     def reachable_stops(
         self,
@@ -732,21 +772,15 @@ class KVBHafasClient:
         best: dict[str, Reachable] = {}
         for pos in res.get("posL", []):
             idx = pos.get("locX")
-            if idx is None or idx >= len(loc_l):
+            if not _in_range(loc_l, idx):
                 continue
             loc = loc_l[idx]
             mast = loc.get("mMastLocX")
-            if mast is not None and mast < len(loc_l):
+            if _in_range(loc_l, mast):
                 loc = loc_l[mast]
-            crd = loc.get("crd")
             ext_id = loc.get("extId", "")
             entry = Reachable(
-                stop=Stop(
-                    name=loc.get("name", ""),
-                    ext_id=ext_id,
-                    lat=crd["y"] / 1_000_000 if crd else None,
-                    lon=crd["x"] / 1_000_000 if crd else None,
-                ),
+                stop=_stop_from_loc(loc),
                 minutes=pos.get("dur", 0),
                 changes=pos.get("chg", 0),
             )
@@ -794,18 +828,18 @@ class KVBHafasClient:
         common = res.get("common", {})
         prod_l, loc_l = common.get("prodL", []), common.get("locL", [])
         ico_l = common.get("icoL", [])
-        now = float(res.get("planrtTS") or time.time())
+        now = float(res.get("planrtTS") or _time.time())
         vehicles = []
         for jny in res.get("jnyL", []):
             pos = jny.get("pos")
             if not pos:
                 continue
-            prod_idx = jny.get("prodX")
-            prod = prod_l[prod_idx] if prod_idx is not None and prod_idx < len(prod_l) else {}
+            prod = _prod_at(prod_l, jny.get("prodX"))
             bearing = jny.get("dirGeo")
             ani = jny.get("ani") or {}
             next_loc_x = (ani.get("tLocX") or [None])[0]
-            delay, next_stop = self._next_stop_delay(jny, loc_l, next_loc_x, now)
+            prev_loc_x = (ani.get("fLocX") or [None])[0]
+            delay, next_stop = self._next_stop_delay(jny, loc_l, next_loc_x, now, prev_loc_x)
             colour, text_colour = _prod_colours(prod, ico_l)
             vehicles.append(
                 Vehicle(
@@ -827,7 +861,11 @@ class KVBHafasClient:
 
     @staticmethod
     def _next_stop_delay(
-        jny: dict[str, Any], loc_l: list[dict[str, Any]], next_loc_x: int | None, now: float | None = None
+        jny: dict[str, Any],
+        loc_l: list[dict[str, Any]],
+        next_loc_x: int | None,
+        now: float | None = None,
+        prev_loc_x: int | None = None,
     ) -> tuple[int | None, str]:
         """Verspätung und Name des Halts, auf den das Fahrzeug gerade zufährt.
 
@@ -835,25 +873,43 @@ class KVBHafasClient:
         trägt Soll- und Ist-Zeit. Ohne Echtzeit-Prognose bleibt die Verspätung
         None — das ist etwas anderes als "pünktlich". Ebenso, wenn die Prognose
         nicht zu `now` passt (Fahrzeug der falschen Fahrt zugeordnet).
+
+        Hält die Fahrt mehrmals am selben Ort (Ringlinien, Schleifen), zählt
+        der Halt, dessen Vorgänger in `stopL` der Halt ist, von dem das
+        Fahrzeug kommt (`ani.fLocX[0]` = `prev_loc_x`). Hilft das nicht weiter,
+        der Halt, dessen Zeit am nächsten an `now` liegt.
         """
-        if next_loc_x is None or not (0 <= next_loc_x < len(loc_l)):
+        if not _in_range(loc_l, next_loc_x):
             return None, ""
         name = loc_l[next_loc_x].get("name", "")
-        for stop in jny.get("stopL", []):
-            if stop.get("locX") != next_loc_x:
+        stop_l = jny.get("stopL", [])
+        candidates = [i for i, st in enumerate(stop_l) if st.get("locX") == next_loc_x]
+        if not candidates:
+            return None, name
+        if len(candidates) > 1 and prev_loc_x is not None:
+            after_prev = [i for i in candidates if i > 0 and stop_l[i - 1].get("locX") == prev_loc_x]
+            candidates = after_prev or candidates
+        if len(candidates) > 1 and now is not None:
+
+            def distance(i: int) -> float:
+                st = stop_l[i]
+                t = st.get("aTimeR") or st.get("aTimeS") or st.get("dTimeR") or st.get("dTimeS") or ""
+                wall = _wall_timestamp(jny.get("date", ""), t)
+                return abs(wall - now) if wall is not None else float("inf")
+
+            candidates = [min(candidates, key=distance)]
+        stop = stop_l[candidates[0]]
+        for planned, realtime in (("aTimeS", "aTimeR"), ("dTimeS", "dTimeR")):
+            delay = _delay_minutes(stop.get(planned, ""), stop.get(realtime, ""))
+            if delay is None:
                 continue
-            for planned, realtime in (("aTimeS", "aTimeR"), ("dTimeS", "dTimeR")):
-                delay = _delay_minutes(stop.get(planned, ""), stop.get(realtime, ""))
-                if delay is None:
-                    continue
-                if now is not None and not _eta_matches_now(jny.get("date", ""), stop[realtime], now):
-                    log.warning(
-                        "stale realtime for %s: %s=%s on %s doesn't match now, delay %+d dropped",
-                        jny.get("jid"), realtime, stop[realtime], jny.get("date"), delay,
-                    )
-                    return None, name
-                return delay, name
-            break
+            if now is not None and not _eta_matches_now(jny.get("date", ""), stop[realtime], now):
+                log.warning(
+                    "stale realtime for %s: %s=%s on %s doesn't match now, delay %+d dropped",
+                    jny.get("jid"), realtime, stop[realtime], jny.get("date"), delay,
+                )
+                return None, name
+            return delay, name
         return None, name
 
     def journey_segments(self, jid: str) -> dict[tuple[str, str], list[tuple[float, float]]]:
@@ -950,7 +1006,11 @@ class KVBHafasClient:
         """
         res = self._call("LineMatch", {"input": query})
         prod_l = res.get("common", {}).get("prodL", [])
-        return [_line_from_prod(prod_l[ln["prodX"]], ln.get("lineId", "")) for ln in res.get("lineL", []) if ln.get("prodX", -1) < len(prod_l)]
+        return [
+            _line_from_prod(prod_l[ln["prodX"]], ln.get("lineId", ""))
+            for ln in res.get("lineL", [])
+            if _in_range(prod_l, ln.get("prodX"))
+        ]
 
     def all_lines(self, prefix: str = "") -> list[Line]:
         """Kompletter Linienkatalog in einem Request (LineSearch, leerer req).
@@ -964,7 +1024,7 @@ class KVBHafasClient:
         return [
             _line_from_prod(prod_l[ln["prodX"]], ln.get("lineId", ""))
             for ln in res.get("lineL", [])
-            if ln.get("prodX", -1) < len(prod_l) and ln.get("lineId", "").startswith(prefix)
+            if _in_range(prod_l, ln.get("prodX")) and ln.get("lineId", "").startswith(prefix)
         ]
 
     def line_details(self, line_id: str) -> Line:
@@ -992,7 +1052,8 @@ class KVBHafasClient:
         journey_details(). `date`/`time` sind serverseitig Pflicht und
         werden sonst mit "jetzt" gefüllt.
         """
-        now = datetime.now()
+        # HAFAS rechnet in Kölner Ortszeit — nicht in der des Hosts (Container oft UTC).
+        now = datetime.now(LOCAL_TZ)
         req: dict[str, Any] = {
             "input": query,
             # Beide Felder sind Pflicht — ohne date/time antwortet JourneyMatch mit FAIL.
@@ -1004,17 +1065,16 @@ class KVBHafasClient:
         loc_l, prod_l = common.get("locL", []), common.get("prodL", [])
 
         def loc_name(idx: int | None) -> str:
-            return loc_l[idx].get("name", "") if idx is not None and idx < len(loc_l) else ""
+            return loc_l[idx].get("name", "") if _in_range(loc_l, idx) else ""
 
         journeys = []
         for jny in res.get("jnyL", []):
             stop_l = jny.get("stopL", [])
             first, last = (stop_l[0], stop_l[-1]) if stop_l else ({}, {})
-            prod_idx = jny.get("prodX")
             s_days = jny.get("sDaysL") or [{}]
             journeys.append(
                 ScheduledJourney(
-                    line=prod_l[prod_idx].get("name", "") if prod_idx is not None and prod_idx < len(prod_l) else "",
+                    line=_prod_name(_prod_at(prod_l, jny.get("prodX"))),
                     from_name=loc_name(first.get("locX")),
                     to_name=loc_name(last.get("locX")),
                     dep_time=first.get("dTimeS", ""),
@@ -1088,8 +1148,9 @@ class KVBHafasClient:
         con_l = res.get("conL", [])
         if not con_l:
             return WalkRoute(dist_m=0, duration="", points=[])
-        sec_l = con_l[0].get("secL", [{}])
-        gis = sec_l[0].get("gis", {})
+        # Leere secL: Verbindung ohne Abschnitt — Distanz bleibt 0 statt IndexError.
+        sec_l = con_l[0].get("secL") or [{}]
+        gis = sec_l[0].get("gis") or {}
         poly_l = res.get("common", {}).get("polyL", [])
         return WalkRoute(
             dist_m=gis.get("dist", 0),
@@ -1125,16 +1186,11 @@ class KVBHafasClient:
             if ext_id in seen:
                 continue
             seen.add(ext_id)
-            crd = loc.get("crd") or {}
-            has_crd = bool(crd.get("x") or crd.get("y"))
-            stops.append(
-                Stop(
-                    name=loc.get("name", ""),
-                    ext_id=ext_id,
-                    lat=crd["y"] / 1_000_000 if has_crd else None,
-                    lon=crd["x"] / 1_000_000 if has_crd else None,
-                )
-            )
+            stop = _stop_from_loc(loc)
+            # crd 0/0 heißt hier "keine Koordinate", nicht Position null/null im Atlantik.
+            if not (stop.lat or stop.lon):
+                stop = replace(stop, lat=None, lon=None)
+            stops.append(stop)
         return stops
 
     def lines_in_area(self, lat: float, lon: float, radius_m: int = 500) -> list[Line]:
@@ -1149,7 +1205,7 @@ class KVBHafasClient:
         lines, seen = [], set()
         for entry in res.get("lineL", []):
             prod_idx = entry.get("prodX")
-            if prod_idx is None or prod_idx >= len(prod_l):
+            if not _in_range(prod_l, prod_idx):
                 continue
             line = _line_from_prod(prod_l[prod_idx], entry.get("lineId", ""))
             if line.line_id in seen:

@@ -1,5 +1,7 @@
 """Störungsmeldungen — netzweit, je Haltestelle oder je Linie."""
 
+from __future__ import annotations
+
 import questionary
 from rich import box
 from rich.markup import escape as esc

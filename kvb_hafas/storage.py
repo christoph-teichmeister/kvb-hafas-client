@@ -117,6 +117,10 @@ def store_route(conn: sqlite3.Connection, route: JourneyRoute) -> int:
             now,
         ),
     )
+    # Alte Halte der Fahrt zuerst weg (gleiche Transaktion wie die Inserts):
+    # sonst blieben beim erneuten Speichern eines kürzeren Laufwegs die
+    # überzähligen idx als Geisterhalte stehen.
+    conn.execute("DELETE FROM stop_time WHERE jid = ?", (route.jid,))
     conn.executemany(
         """INSERT INTO stop_time (jid, idx, stop_ext_id, arr_planned, dep_planned, cancelled)
            VALUES (?, ?, ?, ?, ?, ?)

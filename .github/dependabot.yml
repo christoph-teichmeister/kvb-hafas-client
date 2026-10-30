@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Dependabot-PR-Titel müssen den Conventional-Commits-Check (pr-title-lint.yml) bestehen.
+    commit-message:
+      prefix: ci

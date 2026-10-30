@@ -837,7 +837,7 @@ def test_journey_route_resolves_stops_and_service_days():
 
 def test_min_interval_throttles_calls(monkeypatch):
     sleeps = []
-    monkeypatch.setattr("kvb_hafas.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("kvb_hafas.client._time.sleep", sleeps.append)
     client = KVBHafasClient(min_interval=1.0)
     with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)):
         client.station_board("900000002")
@@ -848,7 +848,7 @@ def test_min_interval_throttles_calls(monkeypatch):
 
 def test_no_throttle_by_default(monkeypatch):
     sleeps = []
-    monkeypatch.setattr("kvb_hafas.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("kvb_hafas.client._time.sleep", sleeps.append)
     client = KVBHafasClient()
     with patch.object(client.session, "post", return_value=_mock_response(STATIONBOARD_RESPONSE)):
         client.station_board("900000002")

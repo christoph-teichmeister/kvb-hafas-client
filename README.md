@@ -80,7 +80,8 @@ uv run map_server.py
 
 Startet auf `http://localhost:8099` — Vehicle-/Alert-/Netz-/Stops-Endpunkte,
 Geometrie-Prefetch und SQLite-Vehicle-History laufen komplett hier
-(`kvb_hafas/server/`), keine externen Dependencies über `requests` hinaus.
+(`kvb_hafas/server/`), keine externen Dependencies über `requests` und `tzdata` hinaus.
+Alle lokalen `/api/*`-Endpunkte mit Parametern: [docs/server-api.md](docs/server-api.md).
 Konfiguration über Env-Vars (`PORT`, `HISTORY_ENABLED`,
 `HISTORY_SAMPLE_INTERVAL_SECONDS`, `VEHICLE_POLL_CACHE_TTL_SECONDS`,
 `HISTORY_DB_FILE` (Pfad der Verlaufs-DB; Default `$DATA_DIR/history.db`, als
@@ -120,13 +121,14 @@ OpenStreetMap-Mitwirkende.
 
 > ⚠️ Der `ani`-Track gibt `proc` in **Prozent** an, nicht in Promille.
 
-Die Library hängt nur an `requests`. Die CLI zusätzlich an `questionary` und
+Die Library hängt nur an `requests` und `tzdata` (Zeitzonendaten für
+`Europe/Berlin`, auch auf Systemen ohne eigene). Die CLI zusätzlich an `questionary` und
 `rich` — beide in der `dev`-Dependency-Group, nicht Teil des Pakets.
 
 ## Projektstruktur
 
 ```
-kvb_hafas/      Library (nur requests)
+kvb_hafas/      Library (requests + tzdata)
   models.py       Dataclasses: Stop, Departure, Connection, JourneyRoute, …
   parsing.py      HAFAS-Rohdaten-Helfer (Polyline, Mast-/Haltestellen-IDs)
   client.py       KVBHafasClient — alle Requests gegen den mgate-Endpunkt
@@ -135,6 +137,8 @@ cli/            Interaktive Terminal-Oberfläche (questionary + rich)
   ui.py           Prompts, Auswahlmenüs, Panels
   format.py       HAFAS-Zeiten/Dauern -> lesbare Strings
   departures.py / trips.py / alerts.py / geo.py / network.py   je ein Menüpunkt
+tools/          fetch_rail_geometry.py: Gleisverläufe aus OSM -> data/rail_geometry.json
+docs/           API.md (KVB-HAFAS), openapi.yaml, server-api.md (lokale /api/*-Endpunkte)
 timetable/      Fahrplan-Erhebung: fetch.py (einsammeln), analyze.py + analyze.sql (auswerten)
 main.py         Entry-Point der CLI
 map_server.py   Entry-Point des Web-UI-Servers (uv run map_server.py)
@@ -143,8 +147,9 @@ kvb_hafas/server/  HTTP-Server für die Web-UI (auch von kvb-ha-map importiert)
   history_store.py  SQLite-Zeitreihe für Fahrzeugpositionen
   stats.py          Live- und historische Verspätungsstatistiken
   eta.py            ETA einer Fahrt an einem beliebigen Punkt ihrer Strecke
+  data/             im Wheel: rail_geometry.json (aus data/ im Repo, siehe pyproject.toml)
 kvb_hafas/webui/  UI-Assets (Package-Daten)
-  index.html, map.html, departures.html, dashboard.html, shared.css
+  index.html, map.html, departures.html, dashboard.html, shared.css, shared.js
   is_kvb_local.py   Bucketing-Helfer: lokale (Tram/Bus) vs. durchfahrende Linien
   vendor/           Leaflet 1.9.4 lokal (leaflet.js/css + Marker-Images)
 ```
@@ -182,6 +187,7 @@ deaktiviert (CORS, und es ist KVB-Produktions-Infrastruktur).
 
 ```bash
 uv run pytest tests/ -v
+uv run ruff check .
 ```
 
 Tests laufen komplett gegen gemockte HTTP-Responses — keine Live-Calls gegen

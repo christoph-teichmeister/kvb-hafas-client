@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from kvb_hafas.models import Line
+from kvb_hafas.models import Line, Stop
 
 log = logging.getLogger(__name__)
 
@@ -37,12 +37,36 @@ def _line_from_prod(prod: dict[str, Any], line_id: str, op_l: list[dict[str, Any
     if op_l and op_idx is not None and op_idx < len(op_l):
         operator = op_l[op_idx].get("name")
     return Line(
-        name=prod.get("name", ""),
+        name=_prod_name(prod),
         line_id=line_id or ctx.get("lineId", ""),
         category=ctx.get("catOut"),
         operator=operator,
         journeys=stats.get("cnt"),
         stats=stats,
+    )
+
+
+def _in_range(seq: list[Any], idx: Any) -> bool:
+    """Ist `idx` ein gültiger Index in `seq`? Fehlend/negativ zählt als ungültig —
+    `seq[-1]` würde sonst stillschweigend den letzten Eintrag treffen."""
+    return isinstance(idx, int) and 0 <= idx < len(seq)
+
+
+def _prod_at(prod_l: list[dict[str, Any]], idx: Any) -> dict[str, Any]:
+    """`prodL[idx]`, oder `{}` bei fehlendem/ungültigem Index."""
+    return prod_l[idx] if _in_range(prod_l, idx) else {}
+
+
+def _stop_from_loc(loc: dict[str, Any], lines: tuple[str, ...] = ()) -> Stop:
+    """`locL`-Eintrag -> Stop. Koordinate nur, wenn `crd` x *und* y trägt."""
+    crd = loc.get("crd") or {}
+    has_crd = crd.get("x") is not None and crd.get("y") is not None
+    return Stop(
+        name=loc.get("name", ""),
+        ext_id=loc.get("extId", ""),
+        lat=crd["y"] / 1_000_000 if has_crd else None,
+        lon=crd["x"] / 1_000_000 if has_crd else None,
+        lines=lines,
     )
 
 
@@ -109,7 +133,7 @@ def _mast_steig(loc_l: list[dict[str, Any]], loc_x: int | None) -> str | None:
     ponytail: Heuristik auf dem ID-Schema, kein dokumentiertes Feld. Bricht,
     wenn KVB die Mast-IDs umstellt — dann fällt nur der Fallback weg.
     """
-    if loc_x is None or loc_x >= len(loc_l):
+    if not _in_range(loc_l, loc_x):
         return None
     ext_id = loc_l[loc_x].get("extId", "")
     if len(ext_id) == 9 and ext_id.startswith("3") and ext_id[-1] != "0":
@@ -128,11 +152,17 @@ def _eta_matches_now(date: str, realtime: str, now: float) -> bool:
     """Liegt die Echtzeit-Prognose `realtime` der Fahrt vom `date` (YYYYMMDD)
     höchstens MAX_ETA_DRIFT_MINUTES von `now` (Unix-Zeit) entfernt?
     Unbekanntes Format zählt als passend — dann wird nichts verworfen."""
+    wall = _wall_timestamp(date, realtime)
+    return wall is None or abs(wall - now) <= MAX_ETA_DRIFT_MINUTES * 60
+
+
+def _wall_timestamp(date: str, t: str) -> float | None:
+    """HAFAS-Zeit `t` der Fahrt vom `date` (YYYYMMDD) -> Unix-Zeit; None bei unbekanntem Format."""
     try:
-        wall = datetime.strptime(date, "%Y%m%d") + timedelta(minutes=_hafas_minutes(realtime))
+        wall = datetime.strptime(date, "%Y%m%d") + timedelta(minutes=_hafas_minutes(t))
     except ValueError:
-        return True
-    return abs(wall.replace(tzinfo=LOCAL_TZ).timestamp() - now) <= MAX_ETA_DRIFT_MINUTES * 60
+        return None
+    return wall.replace(tzinfo=LOCAL_TZ).timestamp()
 
 
 def _delay_minutes(planned: str, realtime: str) -> int | None:

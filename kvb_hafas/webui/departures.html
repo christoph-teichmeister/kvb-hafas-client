@@ -23,7 +23,8 @@
   <details id="stopSearch">
     <summary>Haltestelle suchen</summary>
     <div class="search">
-      <input type="text" id="query" placeholder="z.B. Neumarkt">
+      <label for="query" class="sr-only">Haltestellenname</label>
+      <input type="search" id="query" placeholder="z.B. Neumarkt" autocomplete="off">
       <button id="searchBtn">Suchen</button>
     </div>
     <button type="button" id="nearMeBtn" class="btn-outline btn-block">📍 Haltestellen in meiner Nähe</button>
@@ -36,6 +37,7 @@
     <div class="stop-board-empty" id="boardsEmpty">Noch keine Haltestelle — oben suchen und favorisieren.</div>
   </div>
 </main>
+<script src="shared.js"></script>
 <script>
 const FAV_KEY = 'kvb-departures-favorites';
 const FAV_NAMES_KEY = 'kvb-departures-favorite-names';
@@ -43,19 +45,20 @@ const WEEKDAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Fr
 let cfg = { favorite_stop_ids: [] };
 let alertsCacheTimer = null;
 
-function friendlyError(err) {
-  if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
-  return err.message || 'Unbekannter Fehler';
-}
-
 function loadLocalFavs() {
-  try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
+  try {
+    const list = JSON.parse(localStorage.getItem(FAV_KEY) || '[]');
+    return Array.isArray(list) ? list.filter(id => typeof id === 'string') : [];
+  } catch { return []; }
 }
 function saveLocalFavs(list) {
   try { localStorage.setItem(FAV_KEY, JSON.stringify(list)); } catch { /* private mode */ }
 }
 function loadFavNames() {
-  try { return JSON.parse(localStorage.getItem(FAV_NAMES_KEY) || '{}'); } catch { return {}; }
+  try {
+    const names = JSON.parse(localStorage.getItem(FAV_NAMES_KEY) || '{}');
+    return names && typeof names === 'object' && !Array.isArray(names) ? names : {};
+  } catch { return {}; }
 }
 function saveFavName(id, name) {
   const names = loadFavNames();
@@ -74,43 +77,12 @@ function isLocalFav(id) {
 // Each favorite (and each stop a user is previewing from search) is its
 // own live card. No click-to-select step: favorites simply appear.
 
-const boards = new Map(); // stopId -> { name, departures, refreshTimer, countdownTimer, el }
+const boards = new Map(); // stopId -> { name, departures, refreshPoll, countdownPoll, el }
 
 function fmtTime(hafas) {
-  if (!hafas) return '—';
-  const t = hafas.slice(-6);
-  return `${t.slice(0, 2)}:${t.slice(2, 4)}`;
-}
-
-// HAFAS times are Cologne wall-clock (HHMMSS; a day-offset prefix refers to
-// the journey's operating day, so it is ignored). Compare against
-// Europe/Berlin, not the device's timezone — otherwise a phone abroad
-// (e.g. Greece, +1h) sees every departure within the next hour as already
-// gone ("Sofort").
-const BERLIN_PARTS = new Intl.DateTimeFormat('en-GB', {
-  timeZone: 'Europe/Berlin', hourCycle: 'h23',
-  year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
-  hour: '2-digit', minute: '2-digit', second: '2-digit',
-});
-const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-
-function berlinNow(date = new Date()) {
-  const p = {};
-  for (const { type, value } of BERLIN_PARTS.formatToParts(date)) p[type] = value;
-  return {
-    year: +p.year, month: +p.month, day: +p.day, weekday: WEEKDAY_INDEX[p.weekday],
-    hour: +p.hour, minute: +p.minute, second: +p.second,
-  };
-}
-
-function minutesUntil(hafas, date = new Date()) {
-  if (!hafas || hafas.length < 4) return null;
-  const now = berlinNow(date);
-  const h = parseInt(hafas.slice(-6, -4), 10), m = parseInt(hafas.slice(-4, -2), 10);
-  const nowMin = now.hour * 60 + now.minute + now.second / 60;
-  let diff = Math.round(h * 60 + m - nowMin);
-  if (diff < -60) diff += 1440;
-  return diff;
+  const t = parseHafasTime(hafas);
+  if (!t) return '—';
+  return `${String(t.hour % 24).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}`;
 }
 
 function headClock() {
@@ -144,6 +116,7 @@ function groupByPlatform(deps) {
 // No platform at all -> no label; the head then only carries the clock.
 function platformLabel(platform) {
   if (!platform) return '';
+  platform = String(platform);
   return /^steig\b/i.test(platform) ? platform : `Steig ${platform}`;
 }
 
@@ -172,9 +145,9 @@ function renderBoardHead(board) {
   const locked = isConfigFav(board.id);
   const closeBtn = fav.active ? '' : `<button type="button" class="board-close" title="Entfernen" aria-label="Board entfernen">✕</button>`;
   board.el.querySelector('.stop-board-head').innerHTML = `
-    <span class="stop-board-name">${board.name}</span>
+    <span class="stop-board-name">${esc(board.name)}</span>
     <div class="stop-board-actions">
-      <button type="button" class="fav-toggle${fav.active ? ' active' : ''}" ${locked ? 'disabled' : ''} title="${fav.title}" aria-label="${fav.title}">${fav.icon}</button>
+      <button type="button" class="fav-toggle${fav.active ? ' active' : ''}" ${locked ? 'disabled' : ''} title="${esc(fav.title)}" aria-label="${esc(fav.title)}" aria-pressed="${fav.active}">${fav.icon}</button>
       ${closeBtn}
     </div>`;
 }
@@ -191,17 +164,17 @@ function renderBoardRows(board) {
       const eta = minutesUntil(d.realtime || d.planned);
       const delayed = !d.cancelled && typeof d.delay_minutes === 'number' && d.delay_minutes > 0;
       const etaText = d.cancelled ? 'Entfällt'
-        : delayed ? `${fmtTime(d.realtime)}<span class="delay-tag">+${d.delay_minutes}</span>`
+        : delayed ? `${esc(fmtTime(d.realtime))}<span class="delay-tag">+${esc(d.delay_minutes)}</span>`
         : eta === null ? '—' : eta === 0 ? 'Sofort' : `${eta} Min`;
       return `<div class="led-row${d.cancelled ? ' cancelled' : ''}">
-        <span class="led-num">${d.line}</span>
-        <span class="led-dest">${d.direction}</span>
+        <span class="led-num">${esc(d.line)}</span>
+        <span class="led-dest">${esc(d.direction)}</span>
         <span class="led-eta">${etaText}</span>
       </div>`;
     }).join('');
     const label = platformLabel(platform);
     return `<div class="led-board">
-      <div class="led-head"><span>${label}</span><span class="led-clock">${headClock()}</span></div>
+      <div class="led-head"><span>${esc(label)}</span><span class="led-clock">${headClock()}</span></div>
       ${rows}
     </div>`;
   }).join('');
@@ -225,15 +198,14 @@ function announceBoardUpdate(board) {
 
 async function refreshBoard(board) {
   try {
-    const res = await fetch(`api/departures?stop_id=${encodeURIComponent(board.id)}&max=15`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
-    board.departures = data.departures || [];
+    const data = await fetchJson(`api/departures?stop_id=${encodeURIComponent(board.id)}&max=15`);
+    if (!boards.has(board.id)) return; // removed while the request was in flight
+    board.departures = Array.isArray(data.departures) ? data.departures : [];
     renderBoardRows(board);
     announceBoardUpdate(board);
   } catch (err) {
     board.el.querySelector('.board-body').innerHTML =
-      `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry-board="${board.id}">Erneut versuchen</button></div>`;
+      `<div class="err">${esc(friendlyError(err))} <button type="button" class="retry" data-retry-board="${esc(board.id)}">Erneut versuchen</button></div>`;
   }
 }
 
@@ -254,23 +226,23 @@ function addBoard(id, name) {
     <div class="led-board board-ticker" style="display:none"><div class="led-ticker"></div></div>`;
   document.getElementById('boards').appendChild(el);
 
-  board = { id, name, departures: [], refreshTimer: null, countdownTimer: null, el };
+  board = { id, name, departures: [], refreshPoll: null, countdownPoll: null, el };
   boards.set(id, board);
   renderBoardHead(board);
   updateEmptyState();
 
   refreshBoard(board);
   renderBoardTicker(board);
-  board.refreshTimer = setInterval(() => refreshBoard(board), 30000);
-  board.countdownTimer = setInterval(() => renderBoardRows(board), 15000);
+  board.refreshPoll = pollWhileVisible(() => refreshBoard(board), 30000);
+  board.countdownPoll = pollWhileVisible(() => renderBoardRows(board), 15000);
   return board;
 }
 
 function removeBoard(id) {
   const board = boards.get(id);
   if (!board) return;
-  clearInterval(board.refreshTimer);
-  clearInterval(board.countdownTimer);
+  board.refreshPoll.stop();
+  board.countdownPoll.stop();
   board.el.remove();
   boards.delete(id);
   updateEmptyState();
@@ -298,9 +270,10 @@ function renderStopList(container, stops) {
   container.innerHTML = '';
   for (const s of stops) {
     const li = document.createElement('li');
-    li.addEventListener('click', () => addBoard(s.ext_id, s.name));
-    const group = document.createElement('span');
-    group.className = 'stop-label-group';
+    const group = document.createElement('button');
+    group.type = 'button';
+    group.className = 'stop-label-group stop-open';
+    group.addEventListener('click', () => addBoard(s.ext_id, s.name));
     const label = document.createElement('span');
     label.textContent = s.name;
     label.title = `ext_id: ${s.ext_id} (für die favorite_stop_ids-Option)`;
@@ -313,11 +286,16 @@ function renderStopList(container, stops) {
     }
     li.appendChild(group);
     const fav = favIcon(s.ext_id);
-    const star = document.createElement('span');
+    const star = document.createElement('button');
+    star.type = 'button';
     star.className = 'fav' + (fav.active ? ' active' : '');
     star.textContent = fav.icon;
     star.title = fav.title;
-    if (!isConfigFav(s.ext_id)) {
+    star.setAttribute('aria-label', `${s.name}: ${fav.title}`);
+    star.setAttribute('aria-pressed', String(fav.active));
+    if (isConfigFav(s.ext_id)) {
+      star.disabled = true;
+    } else {
       star.addEventListener('click', (e) => {
         e.stopPropagation();
         toggleBoardFavorite(s.ext_id, s.name);
@@ -337,8 +315,8 @@ let allStopsCache = null;
 async function loadAllStops() {
   if (allStopsCache) return allStopsCache;
   try {
-    const res = await fetch('api/stops');
-    allStopsCache = res.ok ? (await res.json()).stops || [] : [];
+    const data = await fetchJson('api/stops');
+    allStopsCache = Array.isArray(data.stops) ? data.stops : [];
   } catch (err) {
     allStopsCache = [];
   }
@@ -380,7 +358,7 @@ function findNearbyStops() {
         2: 'Standort konnte nicht ermittelt werden.',
         3: 'Zeitüberschreitung bei der Standortbestimmung.',
       };
-      results.innerHTML = `<li class="err">${messages[err.code] || 'Standort konnte nicht ermittelt werden.'}</li>`;
+      results.innerHTML = `<li class="err">${esc(messages[err.code] || 'Standort konnte nicht ermittelt werden.')}</li>`;
     },
     { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
   );
@@ -392,14 +370,12 @@ async function search() {
   if (!q) { results.innerHTML = ''; return; }
   results.innerHTML = '<li class="empty">suche …</li>';
   try {
-    const res = await fetch(`api/stops/search?q=${encodeURIComponent(q)}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
-    lastResults = data.stops || [];
+    const data = await fetchJson(`api/stops/search?q=${encodeURIComponent(q)}`);
+    lastResults = Array.isArray(data.stops) ? data.stops : [];
     renderResultsCache();
     if (!lastResults.length) results.innerHTML = '<li class="empty">keine Treffer</li>';
   } catch (err) {
-    results.innerHTML = `<li class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="search">Erneut versuchen</button></li>`;
+    results.innerHTML = `<li class="err">${esc(friendlyError(err))} <button type="button" class="retry" data-retry="search">Erneut versuchen</button></li>`;
   }
 }
 
@@ -413,20 +389,18 @@ let allAlerts = [];
 function renderBoardTicker(board) {
   const wrap = board.el.querySelector('.board-ticker');
   const box = wrap.querySelector('.led-ticker');
-  const relevant = allAlerts.filter(a => (a.stops || []).includes(board.name));
-  const text = relevant.map(a => a.text).filter(Boolean).join('   •   ');
+  const relevant = allAlerts.filter(a => Array.isArray(a.stops) && a.stops.includes(board.name));
+  const text = relevant.map(a => a.text).filter(t => typeof t === 'string' && t).join('   •   ');
   if (!text) { wrap.style.display = 'none'; return; }
   const duration = Math.max(16, text.length * 0.25);
   wrap.style.display = '';
-  box.innerHTML = `<span class="track" style="animation-duration:${duration}s">${text}</span>`;
+  box.innerHTML = `<span class="track" style="animation-duration:${duration.toFixed(1)}s">${esc(text)}</span>`;
 }
 
 async function refreshAlertsCache() {
   try {
-    const res = await fetch('api/alerts');
-    if (!res.ok) return;
-    const data = await res.json();
-    allAlerts = data.alerts || [];
+    const data = await fetchJson('api/alerts');
+    allAlerts = Array.isArray(data.alerts) ? data.alerts : [];
   } catch (err) { /* keep previous cache, retry next tick */ }
   for (const board of boards.values()) renderBoardTicker(board);
 }
@@ -437,10 +411,8 @@ async function resolveMissingFavNames(ids) {
   if (!missing.length) return names;
   await Promise.all(missing.map(async (id) => {
     try {
-      const res = await fetch(`api/stops/details?ext_id=${encodeURIComponent(id)}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.name) { names[id] = data.name; saveFavName(id, data.name); }
+      const data = await fetchJson(`api/stops/details?ext_id=${encodeURIComponent(id)}`);
+      if (typeof data.name === 'string' && data.name) { names[id] = data.name; saveFavName(id, data.name); }
     } catch (err) { /* keep showing the id */ }
   }));
   return names;
@@ -448,11 +420,11 @@ async function resolveMissingFavNames(ids) {
 
 async function init() {
   try {
-    const res = await fetch('api/config');
-    if (res.ok) cfg = await res.json();
+    cfg = await fetchJson('api/config');
   } catch (err) { /* defaults */ }
 
   document.getElementById('boardsDate').textContent = headDate();
+  pollWhileVisible(() => { document.getElementById('boardsDate').textContent = headDate(); }, 60000);
 
   const favIds = [...new Set([...(cfg.favorite_stop_ids || []), ...loadLocalFavs()])];
   document.getElementById('stopSearch').open = favIds.length === 0;
@@ -465,7 +437,7 @@ async function init() {
   }
 
   refreshAlertsCache();
-  alertsCacheTimer = setInterval(refreshAlertsCache, 300000);
+  alertsCacheTimer = pollWhileVisible(refreshAlertsCache, 300000);
 
   document.getElementById('searchBtn').addEventListener('click', search);
   document.getElementById('nearMeBtn').addEventListener('click', findNearbyStops);

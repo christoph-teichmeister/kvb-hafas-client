@@ -136,6 +136,10 @@ def passes(route: JourneyRoute, segments: dict[tuple[str, str], list[Point]], po
             t0, p0 = _times(route.date, a, arrival=False)
             t1, p1 = _times(route.date, b, arrival=True)
             if dist <= MAX_ROUTE_DISTANCE_M and None not in (t0, p0, t1, p1):
+                # Ist ab Halt a, aber nur Soll an Halt b (oder umgekehrt) kann
+                # t1 < t0 ergeben — sonst läge die ETA vor der Abfahrt. Dann
+                # gilt die Abfahrtszeit für den ganzen Abschnitt.
+                t1, p1 = max(t1, t0), max(p1, p0)
                 hit = Pass(
                     from_idx=i,
                     distance_m=dist,

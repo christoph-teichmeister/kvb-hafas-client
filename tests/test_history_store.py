@@ -376,3 +376,65 @@ def test_outdated_summary_is_rebuilt_with_current_filters(tmp_path):
         assert s.delay_stats()["lines"][0]["observations"] == 2
     finally:
         s.close()
+
+
+def _indexes(path):
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    try:
+        return {row[0]: row[1] for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'index'")}
+    finally:
+        conn.close()
+
+
+def test_line_observed_at_index_exists(store, tmp_path):
+    sql = _indexes(tmp_path / "history.db")["idx_vehicle_observations_line_observed_at"]
+    assert "(line, observed_at)" in sql
+
+
+def test_line_index_is_added_to_existing_db(tmp_path):
+    """Migration: eine alte history.db ohne den Index bekommt ihn beim Öffnen."""
+    import sqlite3
+
+    db = tmp_path / "history.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """CREATE TABLE vehicle_observations (
+               id INTEGER PRIMARY KEY, jid TEXT NOT NULL, line TEXT NOT NULL, category TEXT NOT NULL,
+               direction TEXT, lat REAL, lon REAL, bearing INTEGER, next_stop TEXT,
+               delay_minutes INTEGER, observed_at INTEGER NOT NULL);
+           INSERT INTO vehicle_observations (jid, line, category, observed_at) VALUES ('j', '1', 'Str', 1);"""
+    )
+    conn.commit()
+    conn.close()
+    assert "idx_vehicle_observations_line_observed_at" not in _indexes(db)
+    HistoryStore(db).close()
+    HistoryStore(db).close()  # idempotent
+    assert "idx_vehicle_observations_line_observed_at" in _indexes(db)
+
+
+def test_failed_summary_upsert_rolls_back_raw_insert(store, monkeypatch):
+    import sqlite3
+
+    def boom(fn):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store._summary, "run", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        store.record_vehicles([_obs("t1", "1", "Str", 5)])
+    monkeypatch.undo()
+    assert store.trip("t1") == []
+    assert store.delay_stats()["lines"] == []
+    # Danach funktioniert das Schreiben wieder normal.
+    store.record_vehicles([_obs("t1", "1", "Str", 5)])
+    assert len(store.trip("t1")) == 1
+    assert store.delay_stats()["lines"][0]["observations"] == 1
+
+
+def test_vehicles_filters_by_line_and_time_range(store):
+    now = int(time.time())
+    store.record_vehicles([_obs("a", "1", "Str", 0), _obs("b", "5", "Str", 0)], observed_at=now - 7200)
+    store.record_vehicles([_obs("c", "1", "Str", 0)], observed_at=now - 60)
+    rows = store.vehicles(line="1", ts_from=now - 3600, ts_to=now)
+    assert [r["jid"] for r in rows] == ["c"]

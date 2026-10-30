@@ -34,9 +34,9 @@
 
   <h2>Pünktlichkeit je Linie</h2>
   <div class="window-toggle" role="group" aria-label="Zeitraum" id="punctualityWindow">
-    <button type="button" data-value="7d">7 Tage</button>
-    <button type="button" data-value="24h" class="active">24h</button>
-    <button type="button" data-value="1h">1h</button>
+    <button type="button" data-value="7d" aria-pressed="false">7 Tage</button>
+    <button type="button" data-value="24h" class="active" aria-pressed="true">24h</button>
+    <button type="button" data-value="1h" aria-pressed="false">1h</button>
   </div>
   <div id="punctualityChart" class="chart-wrap"><div class="chart-loading" role="status"><span class="spinner"></span>Lade Daten …</div></div>
   <div class="line-filter" id="lineFilter" hidden>
@@ -52,14 +52,14 @@
   <h2>Pünktlichkeit nach Tageszeit</h2>
   <div class="toggle-row">
     <div class="window-toggle" role="group" aria-label="Zeitraum" id="heatmapWindow">
-      <button type="button" data-value="28d">28 Tage</button>
-      <button type="button" data-value="7d" class="active">7 Tage</button>
+      <button type="button" data-value="28d" aria-pressed="false">28 Tage</button>
+      <button type="button" data-value="7d" class="active" aria-pressed="true">7 Tage</button>
     </div>
     <div class="window-toggle" role="group" aria-label="Wochentage" id="heatmapDays">
-      <button type="button" data-value="all" class="active">Alle Tage</button>
-      <button type="button" data-value="weekday">Mo–Fr</button>
-      <button type="button" data-value="sat">Sa</button>
-      <button type="button" data-value="sun">So</button>
+      <button type="button" data-value="all" class="active" aria-pressed="true">Alle Tage</button>
+      <button type="button" data-value="weekday" aria-pressed="false">Mo–Fr</button>
+      <button type="button" data-value="sat" aria-pressed="false">Sa</button>
+      <button type="button" data-value="sun" aria-pressed="false">So</button>
     </div>
   </div>
   <div class="chart-wrap" id="hourHeatmapWrap">
@@ -69,6 +69,7 @@
   <p class="chart-caption" id="heatmapCaption"></p>
   <div class="note" id="historyNote"></div>
 </main>
+<script src="shared.js"></script>
 <script>
 let refreshSeconds = 15;
 
@@ -82,20 +83,17 @@ function lineColor(line) {
   return i >= 0 ? LINE_COLORS[i] : 'hsl(0, 0%, 60%)';
 }
 
-function friendlyError(err) {
-  if (err instanceof TypeError) return 'Netzwerkfehler — ist der Server erreichbar?';
-  return err.message || 'Unbekannter Fehler';
-}
-
+// value/label/sub are plain text (escaped here), never HTML.
 function statRow(value, label, trend, textValue) {
-  const t = trend ? `<span class="trend ${trend > 0 ? 'up' : 'down'}">${trend > 0 ? '▲' : '▼'}${Math.abs(trend)}</span>` : '';
+  const t = typeof trend === 'number' && isFinite(trend) && trend
+    ? `<span class="trend ${trend > 0 ? 'up' : 'down'}">${trend > 0 ? '▲' : '▼'}${Math.abs(trend)}</span>` : '';
   const cls = textValue ? 'value text' : 'value';
-  return `<div class="stat-row"><span class="label">${label}</span><span class="${cls}">${value}${t}</span></div>`;
+  return `<div class="stat-row"><span class="label">${esc(label)}</span><span class="${cls}">${esc(value)}${t}</span></div>`;
 }
 
 function statRowSub(value, label, sub) {
-  const subHtml = sub ? `<span class="sub">${sub}</span>` : '';
-  return `<div class="stat-row"><span class="label">${label}${subHtml}</span><span class="value">${value}</span></div>`;
+  const subHtml = sub ? `<span class="sub">${esc(sub)}</span>` : '';
+  return `<div class="stat-row"><span class="label">${esc(label)}${subHtml}</span><span class="value">${esc(value)}</span></div>`;
 }
 
 function maxDelayTile(d) {
@@ -104,13 +102,13 @@ function maxDelayTile(d) {
   const inner = statRowSub(d.max_current_delay_minutes ?? '—', 'max. Verspätung (Min)', sub);
   if (!veh) return inner;
   const href = `map.html?line=${encodeURIComponent(veh.line)}&jid=${encodeURIComponent(veh.jid)}`;
-  return `<a class="stat-row-link" href="${href}" title="Auf der Karte anzeigen">${inner}</a>`;
+  return `<a class="stat-row-link" href="${esc(href)}" title="Auf der Karte anzeigen">${inner}</a>`;
 }
 
 function historicalMaxDelayTile(d) {
   const detail = d.max_delay_detail;
   const when = detail
-    ? new Date(detail.observed_at * 1000).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+    ? fmtBerlin(detail.observed_at * 1000, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
     : '';
   const sub = detail ? `Linie ${detail.line} → ${detail.direction || '—'} · ${when}` : '';
   return statRowSub(d.max_delay_minutes ?? '—', 'max. beobachtete Verspätung (Min)', sub);
@@ -123,12 +121,10 @@ async function refreshLive() {
   const dot = document.getElementById('liveDot');
   const label = document.getElementById('liveLabel');
   try {
-    const res = await fetch('api/stats/live?mode=tram');
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.error || res.statusText);
+    const d = await fetchJson('api/stats/live?mode=tram');
     dot.style.display = 'inline-block';
     label.textContent = `Live - aktualisiert alle ${refreshSeconds}s`;
-    const trend = prevDelayed === null ? null : d.delayed_vehicle_count - prevDelayed;
+    const trend = prevDelayed === null ? null : Number(d.delayed_vehicle_count) - Number(prevDelayed);
     prevDelayed = d.delayed_vehicle_count;
     box.innerHTML = [
       statRow(d.busiest_line ? `Linie ${d.busiest_line} · ${d.busiest_line_count} Fahrzeuge` : '—', 'meist befahrene Linie', null, true),
@@ -138,7 +134,7 @@ async function refreshLive() {
   } catch (err) {
     dot.style.display = 'none';
     label.textContent = '';
-    box.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="live">Erneut versuchen</button></div>`;
+    box.innerHTML = `<div class="err">${esc(friendlyError(err))} <button type="button" class="retry" data-retry="live">Erneut versuchen</button></div>`;
   }
 }
 
@@ -146,9 +142,7 @@ async function refreshDelays() {
   const box = document.getElementById('delayTiles');
   const note = document.getElementById('historyNote');
   try {
-    const res = await fetch('api/stats/delays');
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.error || res.statusText);
+    const d = await fetchJson('api/stats/delays');
     if (d.error === 'history disabled') {
       note.textContent = 'Verlauf ist deaktiviert (history_enabled=false) — keine historischen Statistiken verfügbar.';
       box.innerHTML = '';
@@ -159,7 +153,7 @@ async function refreshDelays() {
     note.textContent = '';
     box.innerHTML = historicalMaxDelayTile(d);
   } catch (err) {
-    box.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="delays">Erneut versuchen</button></div>`;
+    box.innerHTML = `<div class="err">${esc(friendlyError(err))} <button type="button" class="retry" data-retry="delays">Erneut versuchen</button></div>`;
   }
 }
 
@@ -170,12 +164,13 @@ const MIN_SAMPLES = 20;
 let punctualityWindow = '24h';
 const WINDOW_LABELS = { '7d': 'über 7 Tage', '24h': 'über 24 Stunden', '1h': 'über die letzte Stunde' };
 
+// Bucket timestamps are labelled in Cologne time, whatever the device timezone.
 function fmtBucketLabel(ts, window) {
-  const d = new Date(ts * 1000);
+  const p = berlinNow(new Date(ts * 1000));
   if (window === '7d') {
-    return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.`;
+    return `${String(p.day).padStart(2, '0')}.${String(p.month).padStart(2, '0')}.`;
   }
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
 }
 
 // Lines the user deselected in the legend; persisted per browser so the
@@ -311,8 +306,7 @@ let chartGeom = null;
 let hoverState = null; // { i, vy, pinned } — survives the periodic re-render
 
 function fmtTooltipHeader(buckets, i, window) {
-  const d = new Date(buckets[i] * 1000);
-  const wd = d.toLocaleDateString('de-DE', { weekday: 'short' });
+  const wd = fmtBerlin(buckets[i] * 1000, { weekday: 'short' });
   if (window === '7d') return `${wd}, ${fmtBucketLabel(buckets[i], window)}`;
   const step = buckets.length > 1 ? buckets[1] - buckets[0] : 0;
   const end = step ? `–${fmtBucketLabel(buckets[i] + step, window)}` : '';
@@ -373,7 +367,7 @@ function showChartTooltip(i, vy, pinned) {
 
   const rowHtml = rows.map(r => {
     const thin = r.n !== undefined && r.n < MIN_SAMPLES;
-    const nText = r.n === undefined ? '' : `${r.n} Beob.`;
+    const nText = r.n === undefined ? '' : `${esc(r.n)} Beob.`;
     const name = pinned
       ? `<a href="${mapHref(r.line)}">Linie ${r.line}</a>`
       : `Linie ${r.line}`;
@@ -629,7 +623,7 @@ function showHeatTooltip(line, h, pinned) {
     body = `<tr class="nearest"><td>pünktlich</td><td class="num">${pct(v)}</td></tr>` +
       `<tr><td>verspätet</td><td class="num">${pct(1 - v)}</td></tr>` +
       (dayAvg !== null ? `<tr><td>Ø ganzer Tag</td><td class="num">${pct(dayAvg)}</td></tr>` : '') +
-      `<tr${thin ? ' class="thin-warn"' : ''}><td class="n">Beobachtungen</td><td class="num n">${n}${thin ? ' ⚠ wenig Daten' : ''}</td></tr>`;
+      `<tr${thin ? ' class="thin-warn"' : ''}><td class="n">Beobachtungen</td><td class="num n">${esc(n)}${thin ? ' ⚠ wenig Daten' : ''}</td></tr>`;
   }
   const hint = pinned ? '<div class="tip-hint">Linie antippen → Karte</div>' : '';
   tip.innerHTML = `<div class="tip-head"><span class="swatch" style="background:${lineColor(line)}"></span>${name} · ${hourRange(h)}</div>` +
@@ -708,7 +702,7 @@ async function refreshHeatmap() {
   } catch (err) {
     if (url !== heatmapUrl() || cached) return;
     hideHeatTooltip();
-    container.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="heatmap">Erneut versuchen</button></div>`;
+    container.innerHTML = `<div class="err">${esc(friendlyError(err))} <button type="button" class="retry" data-retry="heatmap">Erneut versuchen</button></div>`;
   }
 }
 
@@ -719,9 +713,7 @@ const apiCache = new Map();
 const LOADING_HTML = '<div class="chart-loading" role="status"><span class="spinner"></span>Lade Daten …</div>';
 
 async function getJson(url) {
-  const res = await fetch(url);
-  const d = await res.json();
-  if (!res.ok) throw new Error(d.error || res.statusText);
+  const d = await fetchJson(url);
   apiCache.set(url, d);
   return d;
 }
@@ -744,7 +736,10 @@ function initToggleGroup(id, onChange) {
   group.addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-value]');
     if (!btn || btn.classList.contains('active')) return;
-    group.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+    group.querySelectorAll('button').forEach(b => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
     onChange(btn.dataset.value);
   });
 }
@@ -774,7 +769,7 @@ async function refreshPunctuality() {
   } catch (err) {
     if (url !== punctualityUrl() || cached) return;
     document.getElementById('lineFilter').hidden = true;
-    chart.innerHTML = `<div class="err">${friendlyError(err)} <button type="button" class="retry" data-retry="punctuality">Erneut versuchen</button></div>`;
+    chart.innerHTML = `<div class="err">${esc(friendlyError(err))} <button type="button" class="retry" data-retry="punctuality">Erneut versuchen</button></div>`;
   }
 }
 
@@ -796,11 +791,8 @@ function refreshAll() {
 
 async function init() {
   try {
-    const res = await fetch('api/config');
-    if (res.ok) {
-      const cfg = await res.json();
-      refreshSeconds = cfg.dashboard_refresh_seconds || 15;
-    }
+    const cfg = await fetchJson('api/config');
+    refreshSeconds = Number(cfg.dashboard_refresh_seconds) > 0 ? Number(cfg.dashboard_refresh_seconds) : 15;
   } catch (err) { /* defaults */ }
   initLineFilter();
   initChartTooltip();
@@ -810,11 +802,11 @@ async function init() {
   initToggleGroup('heatmapDays', (v) => { heatmapDays = v; refreshHeatmap(); });
   if (hiddenLines.size) { saveHiddenLines(); syncLinesToUrl(); }
   refreshAll();
-  setInterval(refreshAll, refreshSeconds * 1000);
+  pollWhileVisible(refreshAll, refreshSeconds * 1000);
   refreshHeatmap();
   // Let the default views win the (rate-limited) server first.
   setTimeout(prefetchOthers, 1500);
-  setInterval(refreshHeatmap, HEATMAP_REFRESH_SECONDS * 1000);
+  pollWhileVisible(refreshHeatmap, HEATMAP_REFRESH_SECONDS * 1000);
   document.body.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-retry]');
     if (!btn) return;
