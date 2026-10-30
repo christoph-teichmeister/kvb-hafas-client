@@ -119,3 +119,41 @@ def test_stats_cached_reuses_value_within_ttl():
     assert hs._stats_cached(("t",), 60.0, produce) == {"n": 1}
     assert hs._stats_cached(("t",), 60.0, produce) == {"n": 1}
     assert hs._stats_cached(("t",), 0.0, produce) == {"n": 2}
+
+
+def test_parse_point_validates_lat_lon():
+    import pytest
+
+    from kvb_hafas.server.http_server import _parse_point
+
+    assert _parse_point({"lat": ["50.9"], "lon": ["6.9"]}) == (50.9, 6.9)
+    for bad in ({"lat": ["x"], "lon": ["6.9"]}, {"lat": ["91"], "lon": ["6.9"]}, {}):
+        with pytest.raises(ValueError):
+            _parse_point(bad)
+
+
+def test_journey_eta_caches_trip_and_prefers_finer_cached_geometry(monkeypatch):
+    from kvb_hafas.models import JourneyRoute, JourneyStop, Stop
+    from kvb_hafas.server import http_server
+
+    stops = [
+        JourneyStop(idx=0, stop=Stop(name="A", ext_id="a", lat=50.9, lon=6.90), arr_planned=None, dep_planned="120000"),
+        JourneyStop(idx=1, stop=Stop(name="B", ext_id="b", lat=50.9, lon=6.91), arr_planned="120200", dep_planned=None),
+    ]
+    route = JourneyRoute(jid="j", line="1", direction="B", date="20261030", service_days="", service_bits="", stops=stops)
+    calls = []
+
+    def fetch(jid):
+        calls.append(jid)
+        return route, {("a", "b"): [(50.9, 6.90), (50.9, 6.91)]}
+
+    monkeypatch.setattr(http_server._client, "journey_route_with_segments", fetch)
+    monkeypatch.setattr(http_server, "_journeys", {})
+    # Gecachter Verlauf mit Bogen nach Norden: der Punkt liegt nur auf diesem.
+    monkeypatch.setattr(http_server, "_segments", {("a", "b"): [(50.9, 6.90), (50.91, 6.90), (50.91, 6.91), (50.9, 6.91)]})
+
+    eta = http_server._journey_eta("j", 50.91, 6.905)
+    http_server._journey_eta("j", 50.91, 6.905)
+    assert calls == ["j"]
+    assert eta["distance_m"] == 0
+    assert eta["status"] in {"approaching", "passed"}
