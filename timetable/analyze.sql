@@ -1,5 +1,9 @@
--- Taktungsanalyse auf dem erfassten Soll-Fahrplan (fetch_timetable.py).
--- Aufruf z.B.:  sqlite3 -box timetable.db < analyze.sql
+-- Taktungsanalyse auf dem erfassten Soll-Fahrplan (timetable/fetch.py).
+-- Aufruf z.B.:  sqlite3 -box timetable.db < timetable/analyze.sql
+--         oder:  uv run -m timetable.analyze --db timetable.db
+--
+-- Die DB darf mehrere Linien und Betriebstage enthalten: Takte werden je
+-- Linie, Betriebstag, Mast und Richtung gerechnet, nie darüber hinweg.
 --
 -- Alle Zeiten sind Soll-Zeiten. Verspätungen kommen hier nicht vor — die gibt
 -- die API rückblickend nicht her (siehe docs/API.md, "Historische Daten").
@@ -42,18 +46,23 @@ GROUP BY direction, stop_count
 ORDER BY direction, stop_count;
 
 -- ---------------------------------------------------------------------------
--- 1. Taktabstände (Headways) je Haltestelle und Richtung
+-- 1. Taktabstände (Headways) je Linie, Haltestelle und Richtung
 -- ---------------------------------------------------------------------------
+-- Partitioniert auch nach Linie und Betriebstag: sonst stünde der Abstand
+-- zwischen einer 5 und einer 13 am selben Mast als "Takt" in der Auswertung,
+-- und die erste Fahrt eines Tages bekäme die letzte des Vortags als Vorgänger.
 DROP VIEW IF EXISTS headway;
 CREATE TEMP VIEW headway AS
 WITH dep AS (
-    SELECT s.name                AS haltestelle,
+    SELECT j.line                AS linie,
+           j.service_date        AS betriebstag,
+           s.name                AS haltestelle,
            s.station_id          AS station_id,
            j.direction           AS richtung,
            st.dep_planned        AS abfahrt,
            CAST(strftime('%H', st.dep_planned) AS INTEGER) AS stunde,
            LAG(st.dep_planned) OVER (
-               PARTITION BY st.stop_ext_id, j.direction
+               PARTITION BY j.line, j.service_date, st.stop_ext_id, j.direction
                ORDER BY st.dep_planned
            ) AS vorherige
     FROM stop_time st
@@ -61,22 +70,23 @@ WITH dep AS (
     JOIN stop    s ON s.ext_id = st.stop_ext_id
     WHERE st.dep_planned IS NOT NULL
 )
-SELECT haltestelle, station_id, richtung, abfahrt, stunde,
+SELECT linie, betriebstag, haltestelle, station_id, richtung, abfahrt, stunde,
        (CAST(strftime('%s', abfahrt) AS INTEGER)
         - CAST(strftime('%s', vorherige) AS INTEGER)) / 60 AS takt_min
 FROM dep
 WHERE vorherige IS NOT NULL;
 
-SELECT '— Takt je Stunde und Richtung (netzweit über alle Halte) —' AS "";
-SELECT richtung,
+SELECT '— Takt je Linie, Stunde und Richtung (über alle Halte) —' AS "";
+SELECT linie,
+       richtung,
        stunde,
        COUNT(*)                     AS abfahrten,
        MIN(takt_min)                AS min_takt,
        ROUND(AVG(takt_min), 1)      AS schnitt,
        MAX(takt_min)                AS max_takt
 FROM headway
-GROUP BY richtung, stunde
-ORDER BY richtung, stunde;
+GROUP BY linie, richtung, stunde
+ORDER BY linie, richtung, stunde;
 
 -- ---------------------------------------------------------------------------
 -- 2. Taktbrüche — der eigentliche Ertrag
@@ -87,11 +97,12 @@ ORDER BY richtung, stunde;
 -- Die nächtliche Betriebspause ist der mit Abstand größte "Taktbruch" des
 -- Tages, aber keiner: sie ist gewollt. Ohne die Grenze unten dominiert sie
 -- die Liste und verdeckt die echten Unregelmäßigkeiten im Tagesverkehr.
-SELECT '— Betriebspause (längste Lücke je Richtung) —' AS "";
-SELECT richtung, haltestelle, abfahrt AS wiederaufnahme, takt_min AS pause_min
+SELECT '— Betriebspause (längste Lücke je Linie und Richtung) —' AS "";
+SELECT linie, richtung, haltestelle, abfahrt AS wiederaufnahme, takt_min AS pause_min
 FROM headway h
-WHERE takt_min = (SELECT MAX(takt_min) FROM headway x WHERE x.richtung = h.richtung)
-GROUP BY richtung;
+WHERE takt_min = (SELECT MAX(takt_min) FROM headway x
+                  WHERE x.linie = h.linie AND x.richtung = h.richtung)
+GROUP BY linie, richtung;
 
 SELECT '— Größte Taktbrüche im Tagesverkehr (Lücke > 1,8x Stundenschnitt) —' AS "";
 WITH tagsueber AS (
@@ -100,10 +111,10 @@ WITH tagsueber AS (
 ),
 norm AS (
     SELECT t.*,
-           AVG(takt_min) OVER (PARTITION BY station_id, richtung, stunde) AS schnitt
+           AVG(takt_min) OVER (PARTITION BY linie, station_id, richtung, stunde) AS schnitt
     FROM tagsueber t
 )
-SELECT haltestelle, richtung, abfahrt, takt_min, ROUND(schnitt, 1) AS stundenschnitt
+SELECT linie, haltestelle, richtung, abfahrt, takt_min, ROUND(schnitt, 1) AS stundenschnitt
 FROM norm
 WHERE schnitt > 0 AND takt_min > schnitt * 1.8
 ORDER BY takt_min DESC
@@ -112,7 +123,7 @@ LIMIT 25;
 -- Das Gegenstück: Pulks. Zwei Fahrten dicht hintereinander, danach eine Lücke —
 -- typisch für schlecht verzahnte Linienäste.
 SELECT '— Pulkbildung (Abstand <= 2 min) —' AS "";
-SELECT haltestelle, richtung, abfahrt, takt_min
+SELECT linie, haltestelle, richtung, abfahrt, takt_min
 FROM headway
 WHERE takt_min <= 2
 ORDER BY abfahrt
@@ -121,8 +132,9 @@ LIMIT 25;
 -- ---------------------------------------------------------------------------
 -- 3. Randzeiten: Betriebsbeginn, Betriebsende, Nachtlücke
 -- ---------------------------------------------------------------------------
-SELECT '— Erste/letzte Abfahrt je Haltestelle und Richtung —' AS "";
-SELECT MIN(s.name) AS haltestelle,
+SELECT '— Erste/letzte Abfahrt je Linie, Haltestelle und Richtung —' AS "";
+SELECT j.line AS linie,
+       MIN(s.name) AS haltestelle,
        s.station_id,
        j.direction AS richtung,
        MIN(st.dep_planned) AS erste,
@@ -132,8 +144,8 @@ FROM stop_time st
 JOIN journey j ON j.jid = st.jid
 JOIN stop    s ON s.ext_id = st.stop_ext_id
 WHERE st.dep_planned IS NOT NULL
-GROUP BY s.station_id, j.direction
-ORDER BY haltestelle, j.direction;
+GROUP BY j.line, s.station_id, j.direction
+ORDER BY j.line, haltestelle, j.direction;
 
 -- ---------------------------------------------------------------------------
 -- 4. Fahrzeit über den Tag — zeigt, wo schon Puffer im Fahrplan steckt
@@ -141,6 +153,7 @@ ORDER BY haltestelle, j.direction;
 SELECT '— Fahrzeit Start->Ziel nach Abfahrtsstunde —' AS "";
 WITH laufzeit AS (
     SELECT j.jid,
+           j.line,
            j.direction,
            j.stop_count,
            MIN(st.dep_planned) AS start,
@@ -150,7 +163,8 @@ WITH laufzeit AS (
     GROUP BY j.jid
     HAVING start IS NOT NULL AND ziel IS NOT NULL
 )
-SELECT direction,
+SELECT line,
+       direction,
        stop_count,
        CAST(strftime('%H', start) AS INTEGER) AS abfahrtsstunde,
        COUNT(*) AS fahrten,
@@ -161,21 +175,39 @@ SELECT direction,
        MAX((CAST(strftime('%s', ziel) AS INTEGER)
             - CAST(strftime('%s', start) AS INTEGER)) / 60) AS max_min
 FROM laufzeit
-GROUP BY direction, stop_count, abfahrtsstunde
-ORDER BY direction, stop_count, abfahrtsstunde;
+GROUP BY line, direction, stop_count, abfahrtsstunde
+ORDER BY line, direction, stop_count, abfahrtsstunde;
 
 -- ---------------------------------------------------------------------------
 -- 5. Richtungssymmetrie — fährt die Gegenrichtung zur selben Zeit genauso dicht?
 -- ---------------------------------------------------------------------------
-SELECT '— Takt Hin- vs. Rückrichtung je Stunde —' AS "";
-SELECT stunde,
-       ROUND(AVG(CASE WHEN richtung = 'Heumarkt'         THEN takt_min END), 1) AS richtung_heumarkt,
-       ROUND(AVG(CASE WHEN richtung = 'Am Butzweilerhof' THEN takt_min END), 1) AS richtung_butzweilerhof,
-       ROUND(ABS(AVG(CASE WHEN richtung = 'Heumarkt'         THEN takt_min END)
-               - AVG(CASE WHEN richtung = 'Am Butzweilerhof' THEN takt_min END)), 1) AS differenz
-FROM headway
-GROUP BY stunde
-ORDER BY stunde;
+-- Keine fest kodierten Richtungsnamen: je Linie werden die beiden Richtungen
+-- (alphabetisch) als A und B gegenübergestellt. Linien mit mehr als zwei
+-- Zielen (Kurzläufer mit eigenem dirTxt, Linienäste) fallen hier heraus —
+-- die zeigt der Abschnitt "Laufweglängen" oben.
+SELECT '— Takt Hin- vs. Rückrichtung je Linie und Stunde —' AS "";
+WITH je_richtung AS (
+    SELECT linie, richtung, stunde, AVG(takt_min) AS schnitt
+    FROM headway
+    GROUP BY linie, richtung, stunde
+),
+paar AS (
+    SELECT linie, MIN(richtung) AS richtung_a, MAX(richtung) AS richtung_b
+    FROM headway
+    GROUP BY linie
+    HAVING COUNT(DISTINCT richtung) = 2
+)
+SELECT p.linie,
+       a.stunde,
+       p.richtung_a,
+       ROUND(a.schnitt, 1)                 AS takt_a,
+       p.richtung_b,
+       ROUND(b.schnitt, 1)                 AS takt_b,
+       ROUND(ABS(a.schnitt - b.schnitt), 1) AS differenz
+FROM paar p
+JOIN je_richtung a ON a.linie = p.linie AND a.richtung = p.richtung_a
+JOIN je_richtung b ON b.linie = p.linie AND b.richtung = p.richtung_b AND b.stunde = a.stunde
+ORDER BY p.linie, a.stunde;
 
 -- ---------------------------------------------------------------------------
 -- 6. Plausibilisierung — vor jeder inhaltlichen Aussage laufen lassen
@@ -192,7 +224,7 @@ FROM (
 )
 WHERE dep_planned IS NOT NULL AND vorherige IS NOT NULL AND dep_planned < vorherige;
 
--- Fahrten ohne Laufweg (abgebrochener Lauf) — fetch_timetable.py erneut aufrufen.
+-- Fahrten ohne Laufweg (abgebrochener Lauf) — timetable/fetch.py erneut aufrufen.
 SELECT 'ohne Laufweg' AS problem, j.jid
 FROM journey j LEFT JOIN stop_time st ON st.jid = j.jid
 WHERE st.jid IS NULL;

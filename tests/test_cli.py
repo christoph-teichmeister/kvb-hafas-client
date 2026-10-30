@@ -68,7 +68,7 @@ def test_show_trip_pages_forward_then_exits(monkeypatch):
     # Start, Ziel, dann Via = None (leere Eingabe = kein Zwischenhalt).
     stops = iter([stop, stop, None])
     monkeypatch.setattr(trips, "pick_stop", lambda *a, **k: next(stops))
-    monkeypatch.setattr(trips, "ask", lambda *a, **k: "20260916")
+    monkeypatch.setattr(trips, "ask", lambda text, *a, **k: "12:00" if text.startswith("Uhrzeit") else "20260916")
     monkeypatch.setattr(trips, "pick_products", lambda: None)
     monkeypatch.setattr(trips, "console", MagicMock())
     monkeypatch.setattr(trips, "panel", lambda *a, **k: None)
@@ -82,3 +82,108 @@ def test_show_trip_pages_forward_then_exits(monkeypatch):
     trips.show_trip(FakeClient())
 
     assert calls == [None, "fwd"]
+
+
+# --- Uhrzeit-Eingabe der Verbindungssuche -----------------------------------
+
+
+def test_parse_time_input_accepts_common_forms():
+    from cli.trips import parse_time_input
+
+    assert parse_time_input("07:05") == "070500"
+    assert parse_time_input("7:05") == "070500"
+    assert parse_time_input("0705") == "070500"
+    assert parse_time_input(" 23:59 ") == "235900"
+    assert parse_time_input("705") == "070500"
+
+
+def test_parse_time_input_rejects_garbage():
+    from cli.trips import parse_time_input
+
+    for raw in ("", "abc", "24:00", "12:60", "12345", "1:2", "12:5a"):
+        assert parse_time_input(raw) is None, raw
+
+
+def test_ask_time_reprompts_until_valid(monkeypatch):
+    from cli import trips
+
+    answers = iter(["25:00", "halb acht", "7:30"])
+    monkeypatch.setattr(trips, "ask", lambda *a, **k: next(answers))
+    console = MagicMock()
+    monkeypatch.setattr(trips, "console", console)
+
+    assert trips.ask_time("12:00") == "073000"
+    assert console.print.call_count == 2  # je eine Meldung pro ungültiger Eingabe
+
+
+def test_show_trip_passes_validated_time(monkeypatch):
+    from cli import trips
+
+    seen = {}
+
+    class FakeClient:
+        def trip_page(self, *args, **kwargs):
+            seen.update(kwargs)
+            return TripPage(connections=[])
+
+    stop = Stop(name="Köln Neumarkt", ext_id="900000002")
+    stops = iter([stop, stop, None])
+    monkeypatch.setattr(trips, "pick_stop", lambda *a, **k: next(stops))
+    monkeypatch.setattr(trips, "ask", lambda text, *a, **k: "9:15" if text.startswith("Uhrzeit") else "20260916")
+    monkeypatch.setattr(trips, "pick_products", lambda: None)
+    monkeypatch.setattr(trips, "console", MagicMock())
+    monkeypatch.setattr(trips, "panel", lambda *a, **k: None)
+
+    trips.show_trip(FakeClient())
+
+    assert seen["time"] == "091500"
+    assert seen["date"] == "20260916"
+
+
+# --- Abfahrtstafel -----------------------------------------------------------
+
+
+def _dep(planned, realtime=None, platform="1", cancelled=False, line="5"):
+    from kvb_hafas import Departure
+
+    return Departure(line=line, direction="Heumarkt", planned=planned, realtime=realtime,
+                     platform=platform, cancelled=cancelled, jid="j")
+
+
+def test_departure_table_sorts_across_midnight():
+    from cli.departures import departure_table
+
+    deps = [_dep("01000500", line="A"), _dep("235000", line="B"), _dep("01001500", line="C")]
+    departure_table(deps)  # sortiert in place
+    assert [d.line for d in deps] == ["B", "A", "C"]
+
+
+def test_departure_table_groups_by_platform_then_time():
+    from cli.departures import departure_table
+
+    deps = [_dep("120000", platform="2", line="x"), _dep("01000100", platform="1", line="y"),
+            _dep("233000", platform="1", line="z")]
+    departure_table(deps)
+    assert [d.line for d in deps] == ["z", "y", "x"]
+
+
+def test_live_cell_variants():
+    from cli.departures import live_cell
+
+    assert live_cell(_dep("120000", cancelled=True)) == "[red bold]AUSFALL[/]"
+    assert live_cell(_dep("120000")) == ""
+    assert live_cell(_dep("120000", "120000")) == ""
+    assert live_cell(_dep("120000", "120500")) == "[red]12:05 (+5)[/]"
+    assert live_cell(_dep("120000", "120200")) == "[yellow]12:02 (+2)[/]"
+    # Über Mitternacht: 23:58 geplant, 00:01 am Folgetag -> +3
+    assert live_cell(_dep("235800", "01000100")) == "[yellow]00:01 (+3)[/]"
+
+
+def test_live_cell_without_computable_delay_has_no_fake_zero():
+    from cli.departures import live_cell
+
+    # Unlesbare Echtzeit: Delay None -> keine "(+0)"-Anzeige.
+    cell = live_cell(_dep("120000", "kaputt"))
+    assert "(+0)" not in cell
+    # Nur Sekunden abweichend: pünktlich, nichts anzeigen statt "(+0)".
+    assert live_cell(_dep("120000", "120030")) == ""

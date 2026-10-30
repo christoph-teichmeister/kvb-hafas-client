@@ -15,7 +15,9 @@ from __future__ import annotations
 import heapq
 import json
 import math
+import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -26,13 +28,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from kvb_hafas.parsing import station_ext_id  # noqa: E402  (erst nach dem Pfad-Setup importierbar)
+
 GEOMETRY_FILE = ROOT / "data" / "map_geometry.json"
 RAIL_FILE = ROOT / "data" / "rail_geometry.json"
 OSM_CACHE_DIR = ROOT / ".cache"
 
-# Nur der Kartenausschnitt plus Rand. Die gecachten Abschnitte reichen von Paris
-# bis Berlin (ICE, THA) — dafür ein Schienennetz zu routen wäre absurd, und
-# sichtbar ist davon ohnehin nichts.
 # Nur der Kartenausschnitt plus Rand. Die gecachten Abschnitte reichen von Paris
 # bis Berlin (ICE, THA) — dafür ein Schienennetz zu routen wäre absurd, und
 # sichtbar ist davon ohnehin nichts.
@@ -97,7 +97,7 @@ def fetch_tile(box: tuple[float, float, float, float], query: str, prefix: str) 
     Eine leere Antwort wird nicht gecacht — ein Spiegel mit anderem Auszug würde
     sonst dauerhaft ein leeres Netz festschreiben.
     """
-    cache = OSM_CACHE_DIR / ("%s_%.2f_%.2f.json" % (prefix, box[0], box[1]))
+    cache = OSM_CACHE_DIR / f"{prefix}_{box[0]:.2f}_{box[1]:.2f}.json"
     if cache.exists():
         return json.loads(cache.read_text(encoding="utf-8"))
     data = urllib.parse.urlencode({"data": query.format(*box)}).encode()
@@ -301,7 +301,39 @@ def route_towards(graph, start, goal_pt) -> list[tuple[float, float]] | None:
     return path[::-1]
 
 
+def require_geometry_file() -> None:
+    """Ohne map_geometry.json gibt es nichts zu routen — sauber abbrechen statt Traceback.
+
+    Die Datei schreibt der Kartenserver (`uv run map_server.py`), sobald er
+    Fahrzeugverläufe gesehen hat.
+    """
+    if not GEOMETRY_FILE.is_file():
+        print(
+            f"{GEOMETRY_FILE} fehlt. Erst `uv run map_server.py` laufen lassen und die Karte "
+            "eine Weile offen haben, damit Zugverläufe gecacht werden.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Erst in eine Nachbardatei schreiben, dann umbenennen.
+
+    Ein Abbruch mitten im Schreiben (Ctrl-C nach einer halben Stunde Routing)
+    hinterlässt sonst eine halbe JSON-Datei, die der Server beim Start verwirft.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def main() -> None:
+    require_geometry_file()
     # Frühere Läufe behalten: map_geometry.json trägt inzwischen die aufgelösten
     # Verläufe selbst, die Halte-Paare tauchen dort also nicht mehr als gerade auf.
     try:
@@ -345,7 +377,7 @@ def main() -> None:
             if done % 50 == 0:
                 print(f"  {what} {done}/{len(segments)} · {len(resolved)} gelöst", flush=True)
 
-    RAIL_FILE.write_text(json.dumps(resolved), encoding="utf-8")
+    write_atomic(RAIL_FILE, json.dumps(resolved))
     print(f"{len(resolved)} Abschnitte nach {RAIL_FILE.name}; {skipped} bleiben gerade")
 
 

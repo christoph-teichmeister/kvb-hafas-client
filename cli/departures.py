@@ -1,5 +1,7 @@
 """Abfahrtstafel einer Haltestelle."""
 
+from __future__ import annotations
+
 from itertools import groupby
 
 from rich import box
@@ -7,9 +9,39 @@ from rich.markup import escape as esc
 from rich.table import Table
 
 from kvb_hafas import Departure, KVBHafasClient
+from kvb_hafas.parsing import _delay_minutes, _hafas_minutes
 
-from cli.format import delay_min, hhmm
+from cli.format import hhmm
 from cli.ui import ask, console, panel, pick_stop
+
+
+def _planned_minutes(dep: Departure) -> int:
+    """Soll-Abfahrt in Minuten ab Mitternacht des Abfragetags.
+
+    HAFAS hängt Abfahrten nach Mitternacht ein Tages-Prefix an ("01000500"),
+    deshalb sortiert 00:05 so hinter 23:50 statt davor. Unlesbare Zeiten
+    landen am Ende.
+    """
+    try:
+        return _hafas_minutes(dep.planned)
+    except (ValueError, TypeError):
+        return 1 << 30
+
+
+def live_cell(dep: Departure) -> str:
+    """Echtzeit-Spalte: Ausfall, neue Zeit mit Verspätung oder leer (pünktlich/ohne Echtzeit)."""
+    if dep.cancelled:
+        return "[red bold]AUSFALL[/]"
+    if not dep.realtime or dep.realtime == dep.planned:
+        return ""
+    mins = _delay_minutes(dep.planned, dep.realtime)
+    if mins is None:
+        # Zeit nicht auswertbar oder unplausibel: Echtzeit zeigen, aber keine erfundene "(+0)".
+        return f"[yellow]{hhmm(dep.realtime)}[/]"
+    if mins == 0:
+        return ""
+    return f"[{'red' if mins > 3 else 'yellow'}]{hhmm(dep.realtime)} ({mins:+d})[/]"
+
 
 def departure_table(deps: list[Departure]) -> Table:
     """Abfahrtstafel als Tabelle, nach Gleis/Steig gruppiert."""
@@ -20,19 +52,13 @@ def departure_table(deps: list[Departure]) -> Table:
     table.add_column("Richtung")
     table.add_column("Echtzeit")
 
-    deps.sort(key=lambda d: (d.platform or "", d.planned))
+    deps.sort(key=lambda d: (d.platform or "", _planned_minutes(d)))
     for platform, group in groupby(deps, key=lambda d: d.platform):
         # Fallback-Werte kommen schon als "Steig N", echte dPlatf-Werte als "2"/"A".
         label = platform if (platform or "").startswith("Steig") else f"Gleis {platform or '?'}"
         table.add_section()
         for i, dep in enumerate(group):
-            live = ""
-            if dep.cancelled:
-                live = "[red bold]AUSFALL[/]"
-            elif dep.realtime and dep.realtime != dep.planned:
-                mins = delay_min(dep.planned, dep.realtime)
-                live = f"[{'red' if mins > 3 else 'yellow'}]{hhmm(dep.realtime)} ({mins:+d})[/]"
-            table.add_row(label if i == 0 else "", hhmm(dep.planned), dep.line, esc(dep.direction), live)
+            table.add_row(label if i == 0 else "", hhmm(dep.planned), dep.line, esc(dep.direction), live_cell(dep))
     return table
 
 

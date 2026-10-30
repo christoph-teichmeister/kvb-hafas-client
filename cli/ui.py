@@ -1,5 +1,7 @@
 """Terminal-Bausteine: Console, Prompts, Auswahl-Menüs."""
 
+from __future__ import annotations
+
 import questionary
 from rich.console import Console
 from rich.markup import escape as esc
