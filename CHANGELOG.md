@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [2026.10.9] - 2026-10-30
+
+### Fixes
+- address review findings across client, server, web UI and CI (#26)
+
+
 ## [2026.10.8] - 2026-10-30
 
 ### Features
